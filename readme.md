@@ -74,7 +74,7 @@
 
 | 功能模块       | 技术选型                                                                |
 | ---------- | ------------------------------------------------------------------- |
-| 七牛云 AI 集成     | 七牛云 ASR/TTS/LLM（主接入点：wss://openai.qiniu.com/v1） |              
+| 七牛云 AI 集成     | 七牛云 ASR/TTS/LLM（主接入点：https://openai.qiniu.com/v1） |              
 
 ### 4. 数据存储
 
@@ -149,14 +149,14 @@ API网关（Kong）
 用户选择角色（如哈利波特），前端生成session_id，通过 WebSocket 发送StartChatRequest（protobuf 格式）至后端，后端创建 ASR 会话并连接七牛云 ASR 服务。
 #####   2. 前端录音与分片传输
 前端用react-media-recorder录制语音，按 100ms 分片为VoiceChunk（含session_id、chunk_index、voice_data），通过 WebSocket 流式推送至后端。
-后端转发至七牛云 ASR
-后端接收分片后，按七牛云 ASR 协议（GZIP 压缩 + 协议头封装）转发至wss://openai.qiniu.com/v1/voice/asr，七牛云实时返回识别文本。
-#####   3. LLM 生成角色回应
+#####   3. 后端转发至七牛云 ASR
+后端接收分片后，按七牛云 ASR 协议（GZIP 压缩 + 协议头封装）转发至七牛云ASR(https://openai.qiniu.com/v1/voice/asr)，七牛云实时返回识别文本。
+#####   4. LLM 生成角色回应
 后端检测到用户沉默 1.5 秒后，提取新增识别文本，结合 MongoDB 中的角色人设（如 “哈利波特，15 岁，常用‘梅林的胡子’口头禅”）与七牛云 RAG 知识库，调用deepseek-v3模型生成回应文本。
-#####   4. 七牛云 TTS 合成语音
+#####   5. 七牛云 TTS 合成语音
 后端获取 LLM 文本后，调用七牛云 TTS 接口（指定角色自定义音色 ID），流式接收语音分片，合并后上传至七牛云 OSS，生成公开访问 URL。
-#####   5. 前端播放与记录存储
-后端将语音 URL 与文本封装为AIResponse protobuf，通过 WebSocket 推送给前端，前端播放语音并展示文本；同时将聊天记录存入 MongoDB。
+#####   6. 前端播放与记录存储
+URL 与文本封装为AIResponse protobuf，通过 WebSocket 推送给前端，前端播放语音并展示文本；同时将聊天记录存入 MongoDB。
 
 ## 四、AI 角色必备技能
 
