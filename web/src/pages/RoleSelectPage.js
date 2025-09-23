@@ -16,6 +16,8 @@ const buildQuery = (domain, tags) => {
 
 const RoleSelectPage = () => {
     const [roles, setRoles] = useState([]);
+    const [domainInput, setDomainInput] = useState("");
+    const [tagsInput, setTagsInput] = useState("");
     const [domain, setDomain] = useState("");
     const [tags, setTags] = useState("");
     const [loading, setLoading] = useState(false);
@@ -40,10 +42,8 @@ const RoleSelectPage = () => {
                     setRoles(Array.isArray(data) ? data : [data]);
                 }
             } catch (err) {
-                if (active) {
-                    if (err.name !== "AbortError") {
-                        setError(err.message || "Failed to load roles");
-                    }
+                if (active && err.name !== "AbortError") {
+                    setError(err.message || "Failed to load roles");
                 }
             } finally {
                 if (active) {
@@ -60,32 +60,67 @@ const RoleSelectPage = () => {
         };
     }, [requestUrl]);
 
+    const handleSubmit = (event) => {
+        event.preventDefault();
+        setDomain(domainInput);
+        setTags(tagsInput);
+    };
+
+    const handleReset = () => {
+        setDomainInput("");
+        setTagsInput("");
+        setDomain("");
+        setTags("");
+    };
+
+    const hasActiveFilters = domain.trim() !== "" || tags.trim() !== "";
+
     return (
         <div style={{ padding: "24px" }}>
             <h1>Role Selection</h1>
 
-            <section style={{ marginBottom: "16px" }}>
-                <label style={{ display: "block", marginBottom: "8px" }}>
-                    Domain:
+            <form
+                onSubmit={handleSubmit}
+                style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "12px",
+                    maxWidth: "420px",
+                    marginBottom: "20px",
+                }}
+            >
+                <label style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                    Domain
                     <input
                         type="text"
-                        value={domain}
-                        onChange={(e) => setDomain(e.target.value)}
+                        value={domainInput}
+                        onChange={(e) => setDomainInput(e.target.value)}
                         placeholder="e.g. Literature"
-                        style={{ marginLeft: "8px" }}
                     />
                 </label>
-                <label style={{ display: "block" }}>
-                    Tags:
+                <label style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                    Tags
                     <input
                         type="text"
-                        value={tags}
-                        onChange={(e) => setTags(e.target.value)}
+                        value={tagsInput}
+                        onChange={(e) => setTagsInput(e.target.value)}
                         placeholder="comma separated e.g. Brave, Wizard"
-                        style={{ marginLeft: "8px", width: "280px" }}
                     />
                 </label>
-            </section>
+                <div style={{ display: "flex", gap: "12px" }}>
+                    <button type="submit">Apply Filters</button>
+                    <button type="button" onClick={handleReset}>
+                        Reset
+                    </button>
+                </div>
+            </form>
+
+            {hasActiveFilters && (
+                <div style={{ marginBottom: "16px" }}>
+                    <strong>Active filters:</strong> {domain && `Domain = ${domain}`} {domain && tags && "|"}{" "}
+                    {tags && `Tags contain ${tags}`}
+                </div>
+            )}
 
             {loading && <p>Loading roles...</p>}
             {error && <p style={{ color: "red" }}>Error: {error}</p>}
