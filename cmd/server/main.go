@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/wuwenbin0122/wwb.ai/config"
 	"github.com/wuwenbin0122/wwb.ai/db"
+	"github.com/wuwenbin0122/wwb.ai/handlers"
 	"go.uber.org/zap"
 )
 
@@ -118,6 +119,9 @@ func main() {
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
+
+	roleHandler := handlers.NewRoleHandler(pgPool)
+	router.GET("/api/roles", roleHandler.GetRoles)
 
 	wsHandler := newWebSocketHandler(sugar)
 	router.GET("/ws", func(c *gin.Context) {
