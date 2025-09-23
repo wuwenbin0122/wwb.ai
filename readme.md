@@ -1,13 +1,14 @@
 # AI 角色扮演聊天机器人
 
-本项目旨在创建一个基于 AI 的角色扮演聊天机器人，允许用户与各种历史、文学、影视等角色进行语音互动。通过语音识别（STT）和语音合成（TTS）技术，用户可以通过语音与角色进行流畅对话。项目使用 Go 语言开发后端，前端将由 AI 辅助完成。
+本项目旨在创建一个基于 AI 的角色扮演聊天机器人，允许用户与各种历史、文学、影视等角色进行语音互动。通过语音识别（ASR），自然语言处理（NLP）和语音合成（TTS）技术，用户可以通过语音与角色进行流畅对话。
 
 ___
 
 ## 技术栈
 
 - **后端**：Go 语言，Gin 框架，WebSocket
-- **语音识别（STT）**：七牛云语音识别 API
+- **语音识别（ASR）**：七牛云语音识别 API
+- **自然语言处理（NLP）**： 通过七牛云 API 调用 doubao-1.5-vision-pro
 - **语音合成（TTS）**：七牛云语音合成 API
 - **数据库**：PostgreSQL（关系型数据库），MongoDB（文档数据库），Redis（缓存）
 - **容器化**：Docker 和 Kubernetes
@@ -21,7 +22,7 @@ ___
    - 用户可以根据角色名称、领域（如文学、历史、影视等）、标签（如“幽默”“严肃”）进行搜索，推荐热门角色。
    
 2. **语音实时聊天**：
-   - 用户通过语音与角色对话，AI 会通过语音识别（STT）转化语音为文字，处理后通过语音合成（TTS）输出回应。
+   - 用户通过语音与角色对话，AI 会通过语音识别（STT）转化语音为文字，将文字经过自然语言处理（NLP）后生成的回答通过语音合成（TTS）输出回应。
 
 3. **角色人设还原**：
    - AI 根据角色的背景（例如：苏格拉底的反问，哈利波特的魔法术语）还原角色的语气、用词习惯和知识背景。
@@ -62,8 +63,11 @@ go mod tidy
 DB_USER=your_user
 DB_PASSWORD=your_password
 DB_NAME=your_db
-QINIU_ACCESS_KEY=your_access_key
-QINIU_SECRET_KEY=your_secret_key
+QINIU_API_KEY=your_qiniu_api_key
+QINIU_NLP_ENDPOINT=https://openai.qiniu.com/v1/chat/completions
+QINIU_TTS_ENDPOINT=https://openai.qiniu.com/v1/tts
+QINIU_ASR_ENDPOINT=https://openai.qiniu.com/v1/voice/asr
+
 ```
 
 ### 4. 启动后端服务
