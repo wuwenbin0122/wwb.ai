@@ -7,14 +7,17 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/wuwenbin0122/wwb.ai/internal/auth"
+	"github.com/wuwenbin0122/wwb.ai/internal/db"
 )
 
 type Handler struct {
 	authService *auth.Service
+	postgres    *db.Postgres
+	mongo       *db.Mongo
 }
 
-func NewHandler(authService *auth.Service) *Handler {
-	return &Handler{authService: authService}
+func NewHandler(authService *auth.Service, postgres *db.Postgres, mongo *db.Mongo) *Handler {
+	return &Handler{authService: authService, postgres: postgres, mongo: mongo}
 }
 
 func (h *Handler) RegisterRoutes(router *gin.Engine) {

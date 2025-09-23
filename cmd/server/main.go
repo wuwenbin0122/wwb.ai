@@ -14,6 +14,8 @@ import (
 
 	"github.com/wuwenbin0122/wwb.ai/internal/api"
 	"github.com/wuwenbin0122/wwb.ai/internal/auth"
+	"github.com/wuwenbin0122/wwb.ai/internal/db"
+	"github.com/wuwenbin0122/wwb.ai/internal/utils"
 )
 
 func main() {
@@ -21,22 +23,49 @@ func main() {
 		log.Printf("config: no .env file loaded: %v", err)
 	}
 
-	port := getEnv("PORT", "8080")
-	jwtSecret := getEnv("JWT_SECRET", "")
-	if jwtSecret == "" {
-		log.Println("config: JWT_SECRET not set, falling back to insecure default value")
-		jwtSecret = "dev-secret"
+	cfg, err := utils.LoadConfig()
+	if err != nil {
+		log.Fatalf("config: failed to load: %v", err)
 	}
 
-	authService, err := auth.NewService(jwtSecret, 24*time.Hour)
+	ctx := context.Background()
+
+	postgres, err := db.NewPostgres(ctx, cfg.Postgres)
+	if err != nil {
+		log.Fatalf("postgres: failed to connect: %v", err)
+	}
+	defer postgres.Close()
+
+	if err := postgres.Ping(ctx); err != nil {
+		log.Fatalf("postgres: ping failed: %v", err)
+	}
+	if err := postgres.EnsureSchema(ctx); err != nil {
+		log.Fatalf("postgres: ensure schema: %v", err)
+	}
+
+	mongoStore, err := db.NewMongo(ctx, cfg.Mongo)
+	if err != nil {
+		log.Fatalf("mongo: failed to connect: %v", err)
+	}
+	defer func() {
+		if err := mongoStore.Close(context.Background()); err != nil {
+			log.Printf("mongo: close error: %v", err)
+		}
+	}()
+
+	if err := mongoStore.EnsureCollections(ctx); err != nil {
+		log.Fatalf("mongo: ensure collections: %v", err)
+	}
+
+	authService, err := auth.NewService(cfg.JWTSecret, 24*time.Hour)
 	if err != nil {
 		log.Fatalf("failed to initialise auth service: %v", err)
 	}
 
-	router := setupRouter(authService)
+	router := setupRouter(authService, postgres, mongoStore)
 
 	server := &http.Server{
-		Addr:         ":" + port,
+		Addr:         ":" + cfg.ServerPort,
 		Handler:      router,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
@@ -54,17 +83,17 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := server.Shutdown(ctx); err != nil {
+	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("graceful shutdown failed: %v", err)
 	}
 
 	log.Println("server stopped cleanly")
 }
 
-func setupRouter(authService *auth.Service) *gin.Engine {
+func setupRouter(authService *auth.Service, postgres *db.Postgres, mongoStore *db.Mongo) *gin.Engine {
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery())
 
@@ -75,14 +104,7 @@ func setupRouter(authService *auth.Service) *gin.Engine {
 		})
 	})
 
-	api.NewHandler(authService).RegisterRoutes(router)
+	api.NewHandler(authService, postgres, mongoStore).RegisterRoutes(router)
 
 	return router
-}
-
-func getEnv(key, fallback string) string {
-	if value, ok := os.LookupEnv(key); ok && value != "" {
-		return value
-	}
-	return fallback
 }
