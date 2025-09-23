@@ -11,6 +11,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+
+	"github.com/wuwenbin0122/wwb.ai/internal/api"
+	"github.com/wuwenbin0122/wwb.ai/internal/auth"
 )
 
 func main() {
@@ -19,8 +22,18 @@ func main() {
 	}
 
 	port := getEnv("PORT", "8080")
+	jwtSecret := getEnv("JWT_SECRET", "")
+	if jwtSecret == "" {
+		log.Println("config: JWT_SECRET not set, falling back to insecure default value")
+		jwtSecret = "dev-secret"
+	}
 
-	router := setupRouter()
+	authService, err := auth.NewService(jwtSecret, 24*time.Hour)
+	if err != nil {
+		log.Fatalf("failed to initialise auth service: %v", err)
+	}
+
+	router := setupRouter(authService)
 
 	server := &http.Server{
 		Addr:         ":" + port,
@@ -51,7 +64,7 @@ func main() {
 	log.Println("server stopped cleanly")
 }
 
-func setupRouter() *gin.Engine {
+func setupRouter(authService *auth.Service) *gin.Engine {
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery())
 
@@ -62,7 +75,7 @@ func setupRouter() *gin.Engine {
 		})
 	})
 
-	// TODO: register domain-specific routes once handlers are ready.
+	api.NewHandler(authService).RegisterRoutes(router)
 
 	return router
 }
