@@ -12,7 +12,6 @@ ___
 - **数据库**：PostgreSQL（关系型数据库），MongoDB（文档数据库），Redis（缓存）
 - **容器化**：Docker 和 Kubernetes
 - **监控与日志**：Prometheus、Grafana、Zap
-- **CI/CD**：GitHub Actions
 ___
 ## 功能
 
