@@ -28,38 +28,54 @@ func main() {
 		log.Fatalf("config: failed to load: %v", err)
 	}
 
+	logger, err := utils.NewLogger(cfg.Logging)
+	if err != nil {
+		log.Fatalf("logger: failed to initialise: %v", err)
+	}
+	defer func() {
+		_ = logger.Sync()
+	}()
+
+	sugar := logger.Sugar()
+	sugar.Infow("configuration loaded",
+		"port", cfg.ServerPort,
+		"postgres_host", cfg.Postgres.Host,
+		"mongo_database", cfg.Mongo.Database,
+		"qiniu_endpoint", cfg.QiniuAI.BaseURL(),
+	)
+
 	ctx := context.Background()
 
 	postgres, err := db.NewPostgres(ctx, cfg.Postgres)
 	if err != nil {
-		log.Fatalf("postgres: failed to connect: %v", err)
+		sugar.Fatalw("postgres connection failed", "error", err)
 	}
 	defer postgres.Close()
 
 	if err := postgres.Ping(ctx); err != nil {
-		log.Fatalf("postgres: ping failed: %v", err)
+		sugar.Fatalw("postgres ping failed", "error", err)
 	}
 	if err := postgres.EnsureSchema(ctx); err != nil {
-		log.Fatalf("postgres: ensure schema: %v", err)
+		sugar.Fatalw("postgres schema ensure failed", "error", err)
 	}
 
 	mongoStore, err := db.NewMongo(ctx, cfg.Mongo)
 	if err != nil {
-		log.Fatalf("mongo: failed to connect: %v", err)
+		sugar.Fatalw("mongo connection failed", "error", err)
 	}
 	defer func() {
 		if err := mongoStore.Close(context.Background()); err != nil {
-			log.Printf("mongo: close error: %v", err)
+			sugar.Warnw("mongo close error", "error", err)
 		}
 	}()
 
 	if err := mongoStore.EnsureCollections(ctx); err != nil {
-		log.Fatalf("mongo: ensure collections: %v", err)
+		sugar.Fatalw("mongo ensure collections failed", "error", err)
 	}
 
 	authService, err := auth.NewService(cfg.JWTSecret, 24*time.Hour)
 	if err != nil {
-		log.Fatalf("failed to initialise auth service: %v", err)
+		sugar.Fatalw("auth service initialisation failed", "error", err)
 	}
 
 	router := setupRouter(authService, postgres, mongoStore)
@@ -73,9 +89,9 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("server listening on %s", server.Addr)
+		sugar.Infow("server listening", "addr", server.Addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server crashed: %v", err)
+			sugar.Fatalw("server crashed", "error", err)
 		}
 	}()
 
@@ -87,10 +103,10 @@ func main() {
 	defer cancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("graceful shutdown failed: %v", err)
+		sugar.Warnw("graceful shutdown failed", "error", err)
 	}
 
-	log.Println("server stopped cleanly")
+	sugar.Info("server stopped cleanly")
 }
 
 func setupRouter(authService *auth.Service, postgres *db.Postgres, mongoStore *db.Mongo) *gin.Engine {
