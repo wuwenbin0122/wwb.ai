@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/jackc/pgconn"
 	"github.com/jackc/pgx/v5"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -24,10 +27,18 @@ type Handler struct {
 	mongo       *db.Mongo
 
 	roleLookup func(context.Context, string) (*models.Role, error)
+	roleCreate func(context.Context, roleMutationInput) (*models.Role, error)
+	roleUpdate func(context.Context, string, roleMutationInput) (*models.Role, error)
+	roleDelete func(context.Context, string) error
 }
 
 func NewHandler(authService *auth.Service, postgres *db.Postgres, mongo *db.Mongo) *Handler {
-	return &Handler{authService: authService, postgres: postgres, mongo: mongo}
+	handler := &Handler{authService: authService, postgres: postgres, mongo: mongo}
+	handler.roleLookup = handler.fetchRole
+	handler.roleCreate = handler.createRole
+	handler.roleUpdate = handler.updateRole
+	handler.roleDelete = handler.deleteRole
+	return handler
 }
 
 func (h *Handler) RegisterRoutes(router *gin.Engine) {
@@ -38,6 +49,9 @@ func (h *Handler) RegisterRoutes(router *gin.Engine) {
 	authGroup.POST("/login", h.handleLogin)
 
 	roleGroup := apiGroup.Group("/role")
+	roleGroup.POST("", h.handleRoleCreate)
+	roleGroup.PUT(":id", h.handleRoleUpdate)
+	roleGroup.DELETE(":id", h.handleRoleDelete)
 	roleGroup.POST("/select", h.handleRoleSelect)
 }
 
@@ -54,6 +68,23 @@ type loginRequest struct {
 
 type selectRoleRequest struct {
 	RoleID string
+}
+
+type roleCreateRequest struct {
+	ID          string `json:"id,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type roleUpdateRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type roleMutationInput struct {
+	ID          string
+	Name        string
+	Description string
 }
 
 func (h *Handler) handleRegister(c *gin.Context) {
@@ -152,9 +183,106 @@ func (h *Handler) handleRoleSelect(c *gin.Context) {
 	})
 }
 
+func (h *Handler) handleRoleCreate(c *gin.Context) {
+	var req roleCreateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid payload", err)
+		return
+	}
+
+	if strings.TrimSpace(req.Name) == "" {
+		writeError(c, http.StatusBadRequest, "name is required", errRoleNameRequired)
+		return
+	}
+
+	ctx := c.Request.Context()
+	role, err := h.roleCreate(ctx, roleMutationInput{
+		ID:          req.ID,
+		Name:        req.Name,
+		Description: req.Description,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, errRoleAlreadyExists):
+			writeError(c, http.StatusConflict, err.Error(), err)
+		case errors.Is(err, errRoleNotConfigured):
+			writeError(c, http.StatusInternalServerError, "role store not configured", err)
+		default:
+			writeError(c, http.StatusInternalServerError, "failed to create role", err)
+		}
+		return
+	}
+
+	c.JSON(http.StatusCreated, roleToResponse(role))
+}
+
+func (h *Handler) handleRoleUpdate(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	if id == "" {
+		writeError(c, http.StatusBadRequest, "role id is required", errMissingRoleID)
+		return
+	}
+
+	var req roleUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid payload", err)
+		return
+	}
+
+	if strings.TrimSpace(req.Name) == "" {
+		writeError(c, http.StatusBadRequest, "name is required", errRoleNameRequired)
+		return
+	}
+
+	ctx := c.Request.Context()
+	role, err := h.roleUpdate(ctx, id, roleMutationInput{
+		Name:        req.Name,
+		Description: req.Description,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, errRoleNotFound):
+			writeError(c, http.StatusNotFound, err.Error(), err)
+		case errors.Is(err, errRoleNotConfigured):
+			writeError(c, http.StatusInternalServerError, "role store not configured", err)
+		default:
+			writeError(c, http.StatusInternalServerError, "failed to update role", err)
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, roleToResponse(role))
+}
+
+func (h *Handler) handleRoleDelete(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	if id == "" {
+		writeError(c, http.StatusBadRequest, "role id is required", errMissingRoleID)
+		return
+	}
+
+	ctx := c.Request.Context()
+	if err := h.roleDelete(ctx, id); err != nil {
+		switch {
+		case errors.Is(err, errRoleNotFound):
+			writeError(c, http.StatusNotFound, err.Error(), err)
+		case errors.Is(err, errRoleNotConfigured):
+			writeError(c, http.StatusInternalServerError, "role store not configured", err)
+		default:
+			writeError(c, http.StatusInternalServerError, "failed to delete role", err)
+		}
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
 var (
-	errMissingRoleID = errors.New("roleId is required")
-	errRoleNotFound  = errors.New("role not found")
+	errMissingRoleID     = errors.New("roleId is required")
+	errRoleNotFound      = errors.New("role not found")
+	errRoleNotConfigured = errors.New("role backend not configured")
+	errRoleAlreadyExists = errors.New("role already exists")
+	errRoleNameRequired  = errors.New("name is required")
 )
 
 func (h *Handler) fetchRole(ctx context.Context, roleID string) (*models.Role, error) {
@@ -209,6 +337,116 @@ func roleFromBSON(doc bson.M) *models.Role {
 	return role
 }
 
+func roleToResponse(role *models.Role) gin.H {
+	return gin.H{
+		"id":          role.ID,
+		"name":        role.Name,
+		"description": role.Description,
+		"createdAt":   role.CreatedAt.Format(time.RFC3339),
+	}
+}
+
+func (h *Handler) createRole(ctx context.Context, input roleMutationInput) (*models.Role, error) {
+	if h.postgres == nil || h.postgres.Pool == nil {
+		return nil, errRoleNotConfigured
+	}
+
+	id := strings.TrimSpace(input.ID)
+	if id == "" {
+		id = uuid.NewString()
+	}
+
+	now := time.Now().UTC()
+	_, err := h.postgres.Pool.Exec(ctx,
+		`INSERT INTO roles (id, name, description, created_at) VALUES ($1, $2, $3, $4)`,
+		id, input.Name, input.Description, now,
+	)
+	if err != nil {
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
+			return nil, errRoleAlreadyExists
+		}
+		return nil, err
+	}
+
+	role := &models.Role{
+		ID:          id,
+		Name:        input.Name,
+		Description: input.Description,
+		CreatedAt:   now,
+	}
+
+	if h.mongo != nil && h.mongo.Roles != nil {
+		_, mongoErr := h.mongo.Roles.InsertOne(ctx, bson.M{
+			"_id":         role.ID,
+			"name":        role.Name,
+			"description": role.Description,
+			"created_at":  role.CreatedAt,
+		})
+		if mongoErr != nil && !mongo.IsDuplicateKeyError(mongoErr) {
+			return nil, mongoErr
+		}
+	}
+
+	return role, nil
+}
+
+func (h *Handler) updateRole(ctx context.Context, id string, input roleMutationInput) (*models.Role, error) {
+	if h.postgres == nil || h.postgres.Pool == nil {
+		return nil, errRoleNotConfigured
+	}
+
+	var createdAt time.Time
+	err := h.postgres.Pool.QueryRow(ctx,
+		`UPDATE roles SET name = $1, description = $2 WHERE id = $3 RETURNING created_at`,
+		input.Name, input.Description, id,
+	).Scan(&createdAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errRoleNotFound
+		}
+		return nil, err
+	}
+
+	if h.mongo != nil && h.mongo.Roles != nil {
+		_, mongoErr := h.mongo.Roles.UpdateOne(ctx,
+			bson.M{"_id": id},
+			bson.M{"$set": bson.M{"name": input.Name, "description": input.Description}},
+		)
+		if mongoErr != nil && !errors.Is(mongoErr, mongo.ErrNoDocuments) {
+			return nil, mongoErr
+		}
+	}
+
+	return &models.Role{
+		ID:          id,
+		Name:        input.Name,
+		Description: input.Description,
+		CreatedAt:   createdAt,
+	}, nil
+}
+
+func (h *Handler) deleteRole(ctx context.Context, id string) error {
+	if h.postgres == nil || h.postgres.Pool == nil {
+		return errRoleNotConfigured
+	}
+
+	commandTag, err := h.postgres.Pool.Exec(ctx, `DELETE FROM roles WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if commandTag.RowsAffected() == 0 {
+		return errRoleNotFound
+	}
+
+	if h.mongo != nil && h.mongo.Roles != nil {
+		_, mongoErr := h.mongo.Roles.DeleteOne(ctx, bson.M{"_id": id})
+		if mongoErr != nil && !errors.Is(mongoErr, mongo.ErrNoDocuments) {
+			return mongoErr
+		}
+	}
+
+	return nil
+}
 func newAuthResponse(result *auth.AuthResult) gin.H {
 	return gin.H{
 		"token":     result.Token,

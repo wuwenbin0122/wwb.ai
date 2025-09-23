@@ -108,6 +108,93 @@ func TestRoleSelect(t *testing.T) {
 	}
 }
 
+func TestRoleCreateUpdateDelete(t *testing.T) {
+	router, handler := setupTestRouter(t)
+
+	createdAt := time.Date(2024, time.January, 1, 12, 0, 0, 0, time.UTC)
+	updatedAt := time.Date(2024, time.January, 2, 12, 0, 0, 0, time.UTC)
+
+	handler.roleCreate = func(ctx context.Context, input roleMutationInput) (*models.Role, error) {
+		if input.Name != "New Role" {
+			t.Fatalf("unexpected create name %s", input.Name)
+		}
+		return &models.Role{
+			ID:          "role-10",
+			Name:        input.Name,
+			Description: input.Description,
+			CreatedAt:   createdAt,
+		}, nil
+	}
+
+	handler.roleUpdate = func(ctx context.Context, id string, input roleMutationInput) (*models.Role, error) {
+		if id != "role-10" {
+			t.Fatalf("unexpected update id %s", id)
+		}
+		return &models.Role{
+			ID:          id,
+			Name:        input.Name,
+			Description: input.Description,
+			CreatedAt:   updatedAt,
+		}, nil
+	}
+
+	handler.roleDelete = func(ctx context.Context, id string) error {
+		if id != "role-10" {
+			t.Fatalf("unexpected delete id %s", id)
+		}
+		return nil
+	}
+
+	createBody := map[string]string{
+		"name":        "New Role",
+		"description": "Brand new role",
+	}
+
+	rec := httptest.NewRecorder()
+	req := newJSONRequest(t, http.MethodPost, "/api/role", createBody)
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d", rec.Code)
+	}
+
+	var createResp map[string]any
+	decodeBody(t, rec.Body.Bytes(), &createResp)
+	if createResp["id"] != "role-10" {
+		t.Fatalf("expected created role id role-10, got %v", createResp["id"])
+	}
+
+	updateBody := map[string]string{
+		"name":        "Updated Role",
+		"description": "Updated description",
+	}
+
+	rec = httptest.NewRecorder()
+	req = newJSONRequest(t, http.MethodPut, "/api/role/role-10", updateBody)
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	var updateResp map[string]any
+	decodeBody(t, rec.Body.Bytes(), &updateResp)
+	if updateResp["name"] != "Updated Role" {
+		t.Fatalf("expected updated role name, got %v", updateResp["name"])
+	}
+
+	rec = httptest.NewRecorder()
+	req, err := http.NewRequest(http.MethodDelete, "/api/role/role-10", nil)
+	if err != nil {
+		t.Fatalf("failed to create delete request: %v", err)
+	}
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected status 204, got %d", rec.Code)
+	}
+}
+
 func newJSONRequest(t *testing.T, method, path string, body any) *http.Request {
 	t.Helper()
 	payload, err := json.Marshal(body)
