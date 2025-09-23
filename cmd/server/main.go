@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"errors"
 	"net/http"
 	"os"
 	"os/signal"
@@ -10,88 +10,129 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
-
-	"github.com/wuwenbin0122/wwb.ai/internal/api"
-	"github.com/wuwenbin0122/wwb.ai/internal/auth"
-	"github.com/wuwenbin0122/wwb.ai/internal/db"
-	"github.com/wuwenbin0122/wwb.ai/internal/utils"
+	"github.com/gorilla/websocket"
+	"github.com/wuwenbin0122/wwb.ai/config"
+	"github.com/wuwenbin0122/wwb.ai/db"
+	"go.uber.org/zap"
 )
 
+type webSocketHandler struct {
+	upgrader websocket.Upgrader
+	logger   *zap.SugaredLogger
+}
+
+func newWebSocketHandler(logger *zap.SugaredLogger) *webSocketHandler {
+	return &webSocketHandler{
+		upgrader: websocket.Upgrader{
+			ReadBufferSize:  1024,
+			WriteBufferSize: 1024,
+			CheckOrigin: func(r *http.Request) bool {
+				return true
+			},
+		},
+		logger: logger,
+	}
+}
+
+func (h *webSocketHandler) handle(w http.ResponseWriter, r *http.Request) {
+	conn, err := h.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		h.logger.Errorf("upgrade websocket: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	h.logger.Infof("websocket client connected: %s", r.RemoteAddr)
+
+	for {
+		messageType, payload, err := conn.ReadMessage()
+		if err != nil {
+			if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				h.logger.Warnf("read websocket message: %v", err)
+			}
+			break
+		}
+
+		if err := conn.WriteMessage(messageType, payload); err != nil {
+			h.logger.Warnf("write websocket message: %v", err)
+			break
+		}
+	}
+
+	h.logger.Infof("websocket client disconnected: %s", r.RemoteAddr)
+}
+
 func main() {
-	if err := godotenv.Load(); err != nil {
-		log.Printf("config: no .env file loaded: %v", err)
-	}
-
-	cfg, err := utils.LoadConfig()
+	logger, err := zap.NewProduction()
 	if err != nil {
-		log.Fatalf("config: failed to load: %v", err)
+		panic(err)
 	}
-
-	logger, err := utils.NewLogger(cfg.Logging)
-	if err != nil {
-		log.Fatalf("logger: failed to initialise: %v", err)
-	}
-	defer func() {
-		_ = logger.Sync()
-	}()
+	defer logger.Sync() // ignore error caused by stdout/stderr being closed
 
 	sugar := logger.Sugar()
-	sugar.Infow("configuration loaded",
-		"port", cfg.ServerPort,
-		"postgres_host", cfg.Postgres.Host,
-		"mongo_database", cfg.Mongo.Database,
-		"qiniu_endpoint", cfg.QiniuAI.BaseURL(),
-	)
 
-	ctx := context.Background()
-
-	postgres, err := db.NewPostgres(ctx, cfg.Postgres)
+	cfg, err := config.Load()
 	if err != nil {
-		sugar.Fatalw("postgres connection failed", "error", err)
-	}
-	defer postgres.Close()
-
-	if err := postgres.Ping(ctx); err != nil {
-		sugar.Fatalw("postgres ping failed", "error", err)
-	}
-	if err := postgres.EnsureSchema(ctx); err != nil {
-		sugar.Fatalw("postgres schema ensure failed", "error", err)
+		sugar.Fatalf("load configuration: %v", err)
 	}
 
-	mongoStore, err := db.NewMongo(ctx, cfg.Mongo)
+	baseCtx := context.Background()
+
+	pgPool, err := db.NewPostgresPool(baseCtx, cfg.DBURL)
 	if err != nil {
-		sugar.Fatalw("mongo connection failed", "error", err)
+		sugar.Fatalf("connect postgres: %v", err)
+	}
+	defer pgPool.Close()
+
+	mongoClient, err := db.NewMongoClient(baseCtx, cfg.MongoURI)
+	if err != nil {
+		sugar.Fatalf("connect mongo: %v", err)
 	}
 	defer func() {
-		if err := mongoStore.Close(context.Background()); err != nil {
-			sugar.Warnw("mongo close error", "error", err)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := mongoClient.Disconnect(shutdownCtx); err != nil {
+			sugar.Warnf("disconnect mongo: %v", err)
 		}
 	}()
 
-	if err := mongoStore.EnsureCollections(ctx); err != nil {
-		sugar.Fatalw("mongo ensure collections failed", "error", err)
-	}
-
-	authService, err := auth.NewService(cfg.JWTSecret, 24*time.Hour)
+	redisClient, err := db.NewRedisClient(baseCtx, cfg.RedisURL)
 	if err != nil {
-		sugar.Fatalw("auth service initialisation failed", "error", err)
+		sugar.Fatalf("connect redis: %v", err)
 	}
+	defer func() {
+		if err := redisClient.Close(); err != nil {
+			sugar.Warnf("close redis: %v", err)
+		}
+	}()
 
-	router := setupRouter(authService, postgres, mongoStore)
+	router := gin.Default()
+
+	router.Use(func(c *gin.Context) {
+		c.Set("postgres", pgPool)
+		c.Set("mongo", mongoClient)
+		c.Set("redis", redisClient)
+		c.Next()
+	})
+
+	router.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	wsHandler := newWebSocketHandler(sugar)
+	router.GET("/ws", func(c *gin.Context) {
+		wsHandler.handle(c.Writer, c.Request)
+	})
 
 	server := &http.Server{
-		Addr:         ":" + cfg.ServerPort,
-		Handler:      router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:    cfg.ServerAddr,
+		Handler: router,
 	}
 
 	go func() {
-		sugar.Infow("server listening", "addr", server.Addr)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			sugar.Fatalw("server crashed", "error", err)
+		sugar.Infof("backend server listening on %s", cfg.ServerAddr)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			sugar.Fatalf("start server: %v", err)
 		}
 	}()
 
@@ -99,28 +140,14 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
+	sugar.Info("shutdown signal received")
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		sugar.Warnw("graceful shutdown failed", "error", err)
+		sugar.Errorf("server shutdown: %v", err)
 	}
 
-	sugar.Info("server stopped cleanly")
-}
-
-func setupRouter(authService *auth.Service, postgres *db.Postgres, mongoStore *db.Mongo) *gin.Engine {
-	router := gin.New()
-	router.Use(gin.Logger(), gin.Recovery())
-
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":    "ok",
-			"timestamp": time.Now().UTC().Format(time.RFC3339),
-		})
-	})
-
-	api.NewHandler(authService, postgres, mongoStore).RegisterRoutes(router)
-
-	return router
+	sugar.Info("server exited cleanly")
 }
