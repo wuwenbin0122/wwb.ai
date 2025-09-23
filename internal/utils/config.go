@@ -64,7 +64,7 @@ func LoadConfig() (*Config, error) {
 	port := envOrDefault("PORT", "8080")
 	jwtSecret := envOrDefault("JWT_SECRET", "dev-secret")
 
-	pgPort, _ := strconv.Atoi(envOrDefault("POSTGRES_PORT", "5432"))
+	pgPort, _ := strconv.Atoi(envOrDefault("POSTGRES_PORT", "5433"))
 	maxConns := parseInt32(envOrDefault("POSTGRES_MAX_CONNS", "8"), 8)
 	minConns := parseInt32(envOrDefault("POSTGRES_MIN_CONNS", "1"), 1)
 
@@ -87,8 +87,8 @@ func LoadConfig() (*Config, error) {
 			Host:              envOrDefault("POSTGRES_HOST", "localhost"),
 			Port:              pgPort,
 			User:              envOrDefault("POSTGRES_USER", "postgres"),
-			Password:          envOrDefault("POSTGRES_PASSWORD", "postgres"),
-			Database:          envOrDefault("POSTGRES_DB", "wwb_ai"),
+			Password:          envOrDefault("POSTGRES_PASSWORD", "wwb666666"),
+			Database:          envOrDefault("POSTGRES_DB", "postgres"),
 			MaxConns:          maxConns,
 			MinConns:          minConns,
 			MaxConnLifetime:   parseDuration(envOrDefault("POSTGRES_MAX_CONN_LIFETIME", "1h"), time.Hour),
@@ -98,7 +98,7 @@ func LoadConfig() (*Config, error) {
 		},
 		Mongo: MongoConfig{
 			URI:            envOrDefault("MONGO_URI", "mongodb://localhost:27017"),
-			Database:       envOrDefault("MONGO_DATABASE", "wwb_ai"),
+			Database:       envOrDefault("MONGO_DATABASE", "local"),
 			ConnectTimeout: parseDuration(envOrDefault("MONGO_CONNECT_TIMEOUT", "5s"), 5*time.Second),
 		},
 		Logging: logging,
