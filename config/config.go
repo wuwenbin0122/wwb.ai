@@ -16,11 +16,11 @@ type Config struct {
 	DBURL             string
 	MongoURI          string
 	RedisURL          string
-	QiniuAPIEndpoint  string
+	QiniuAPIBaseURL   string
 	QiniuAPIKey       string
-	QiniuTTSEndpoint  string
 	QiniuTTSVoiceType string
-	QiniuASREndpoint  string
+	QiniuTTSFormat    string
+	QiniuASRModel     string
 }
 
 var (
@@ -36,16 +36,24 @@ func Load() (*Config, error) {
 			return
 		}
 
+		apiBase := strings.TrimSpace(os.Getenv("QINIU_API_BASE_URL"))
+		if apiBase == "" {
+			apiBase = strings.TrimSpace(os.Getenv("QINIU_API_ENDPOINT"))
+		}
+		if apiBase == "" {
+			apiBase = "https://openai.qiniu.com/v1"
+		}
+
 		cfg = &Config{
 			ServerAddr:        getEnv("SERVER_ADDR", ":8080"),
 			DBURL:             strings.TrimSpace(os.Getenv("DB_URL")),
 			MongoURI:          strings.TrimSpace(os.Getenv("MONGO_URI")),
 			RedisURL:          strings.TrimSpace(os.Getenv("REDIS_URL")),
-			QiniuAPIEndpoint:  strings.TrimSpace(os.Getenv("QINIU_API_ENDPOINT")),
+			QiniuAPIBaseURL:   strings.TrimRight(apiBase, "/"),
 			QiniuAPIKey:       strings.TrimSpace(os.Getenv("QINIU_API_KEY")),
-			QiniuTTSEndpoint:  strings.TrimSpace(os.Getenv("QINIU_TTS_ENDPOINT")),
 			QiniuTTSVoiceType: strings.TrimSpace(os.Getenv("QINIU_TTS_VOICE_TYPE")),
-			QiniuASREndpoint:  strings.TrimSpace(os.Getenv("QINIU_ASR_ENDPOINT")),
+			QiniuTTSFormat:    getEnv("QINIU_TTS_FORMAT", "mp3"),
+			QiniuASRModel:     getEnv("QINIU_ASR_MODEL", "asr"),
 		}
 
 		loadErr = cfg.validate()
@@ -95,5 +103,5 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 
-	return fallback
+	return strings.TrimSpace(fallback)
 }
