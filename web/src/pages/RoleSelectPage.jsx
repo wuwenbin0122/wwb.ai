@@ -1,156 +1,132 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "";
-
-const buildQuery = (domain, tags) => {
-    const params = new URLSearchParams();
-    if (domain.trim() !== "") {
-        params.append("domain", domain.trim());
-    }
-    if (tags.trim() !== "") {
-        params.append("tags", tags.trim());
-    }
-    const query = params.toString();
-    return query ? `?${query}` : "";
-};
-
-const RoleSelectPage = () => {
-    const [roles, setRoles] = useState([]);
-    const [domainInput, setDomainInput] = useState("");
-    const [tagsInput, setTagsInput] = useState("");
-    const [domain, setDomain] = useState("");
-    const [tags, setTags] = useState("");
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState(null);
-
-    const requestUrl = useMemo(() => `${API_BASE}/api/roles${buildQuery(domain, tags)}`, [domain, tags]);
+const RolesCatalog = ({
+    roles,
+    loading,
+    error,
+    filters,
+    onApplyFilters,
+    onResetFilters,
+    onStartChat,
+}) => {
+    const [domainInput, setDomainInput] = useState(filters.domain ?? "");
+    const [tagsInput, setTagsInput] = useState(filters.tags ?? "");
 
     useEffect(() => {
-        let active = true;
-        const controller = new AbortController();
+        setDomainInput(filters.domain ?? "");
+    }, [filters.domain]);
 
-        const fetchRoles = async () => {
-            setLoading(true);
-            setError(null);
-            try {
-                const response = await fetch(requestUrl, { signal: controller.signal });
-                if (!response.ok) {
-                    throw new Error(`Request failed with status ${response.status}`);
-                }
-                const data = await response.json();
-                if (active) {
-                    setRoles(Array.isArray(data) ? data : [data]);
-                }
-            } catch (err) {
-                if (active && err.name !== "AbortError") {
-                    setError(err.message || "Failed to load roles");
-                }
-            } finally {
-                if (active) {
-                    setLoading(false);
-                }
-            }
-        };
-
-        fetchRoles();
-
-        return () => {
-            active = false;
-            controller.abort();
-        };
-    }, [requestUrl]);
+    useEffect(() => {
+        setTagsInput(filters.tags ?? "");
+    }, [filters.tags]);
 
     const handleSubmit = (event) => {
         event.preventDefault();
-        setDomain(domainInput.trim());
-        setTags(tagsInput.trim());
+        onApplyFilters(domainInput.trim(), tagsInput.trim());
     };
 
-    const handleReset = () => {
-        setDomainInput("");
-        setTagsInput("");
-        setDomain("");
-        setTags("");
-    };
+    const hasActiveFilters = filters.domain.trim() !== "" || filters.tags.trim() !== "";
 
-    const hasActiveFilters = domain.trim() !== "" || tags.trim() !== "";
-
-    return (
-        <div style={{ padding: "24px" }}>
-            <h1>Role Selection</h1>
-
-            <form
-                onSubmit={handleSubmit}
-                style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: "12px",
-                    maxWidth: "420px",
-                    marginBottom: "20px",
-                }}
-            >
-                <label style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                    Domain
+    const renderFilters = () => (
+        <aside className="filter-panel">
+            <h3>筛选条件</h3>
+            <form onSubmit={handleSubmit} className="filter-form">
+                <label>
+                    领域
                     <input
                         type="text"
                         value={domainInput}
-                        onChange={(e) => setDomainInput(e.target.value)}
-                        placeholder="e.g. Literature"
+                        onChange={(event) => setDomainInput(event.target.value)}
+                        placeholder="例如：Philosophy"
                     />
                 </label>
-                <label style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                    Tags
+                <label>
+                    标签
                     <input
                         type="text"
                         value={tagsInput}
-                        onChange={(e) => setTagsInput(e.target.value)}
-                        placeholder="comma separated e.g. Brave, Wizard"
+                        onChange={(event) => setTagsInput(event.target.value)}
+                        placeholder="用逗号分隔，如：勇敢, 魔法"
                     />
                 </label>
-                <div style={{ display: "flex", gap: "12px" }}>
-                    <button type="submit">Apply Filters</button>
-                    <button type="button" onClick={handleReset}>
-                        Reset
+                <div className="filter-actions">
+                    <button type="submit" className="primary" disabled={loading}>
+                        应用筛选
+                    </button>
+                    <button type="button" className="ghost" onClick={onResetFilters}>
+                        重置
                     </button>
                 </div>
             </form>
 
             {hasActiveFilters && (
-                <div style={{ marginBottom: "16px" }}>
-                    <strong>Active filters:</strong> {domain && `Domain = ${domain}`} {domain && tags && "|"}{" "}
-                    {tags && `Tags contain ${tags}`}
+                <div className="active-filters">
+                    <h4>当前筛选</h4>
+                    <div className="chips">
+                        {filters.domain.trim() !== "" && <span className="chip">领域：{filters.domain}</span>}
+                        {filters.tags
+                            .split(",")
+                            .map((tag) => tag.trim())
+                            .filter(Boolean)
+                            .map((tag) => (
+                                <span key={tag} className="chip">
+                                    标签：{tag}
+                                </span>
+                            ))}
+                    </div>
                 </div>
             )}
+        </aside>
+    );
 
-            {loading && <p>Loading roles...</p>}
-            {error && <p style={{ color: "red" }}>Error: {error}</p>}
+    const renderContent = () => (
+        <div className="catalog-results">
+            <div className="catalog-header">
+                <div>
+                    <h2>角色目录</h2>
+                    <p className="muted">根据主题、语种或标签寻找最适合的 AI 伙伴。</p>
+                </div>
+                <span className="result-count">{roles.length} 个角色</span>
+            </div>
 
-            {!loading && !error && roles.length === 0 && <p>No roles found.</p>}
+            {loading && <p className="muted">正在加载角色…</p>}
+            {error && <p className="error">{error}</p>}
+            {!loading && !error && roles.length === 0 && <p className="muted">没有符合条件的角色。</p>}
 
-            <ul style={{ listStyle: "none", padding: 0 }}>
+            <div className="role-grid">
                 {roles.map((role) => (
-                    <li
-                        key={role.id}
-                        style={{
-                            border: "1px solid #ccc",
-                            borderRadius: "8px",
-                            padding: "12px",
-                            marginBottom: "12px",
-                        }}
-                    >
-                        <h2 style={{ margin: "0 0 8px" }}>{role.name}</h2>
-                        <p style={{ margin: "0 0 4px" }}>
-                            <strong>Domain:</strong> {role.domain || "Unknown"}
-                        </p>
-                        <p style={{ margin: "0 0 4px" }}>
-                            <strong>Tags:</strong> {role.tags || "None"}
-                        </p>
-                        <p style={{ margin: 0 }}>{role.bio || "No bio available."}</p>
-                    </li>
+                    <button key={role.id} type="button" className="role-card" onClick={() => onStartChat(role.id)}>
+                        <div className="role-avatar" aria-hidden="true">
+                            {role.name.slice(0, 2)}
+                        </div>
+                        <div className="role-meta">
+                            <h3>{role.name}</h3>
+                            <p>{role.bio || "暂无简介"}</p>
+                            <div className="tags">
+                                {(role.tags || "")
+                                    .split(",")
+                                    .map((tag) => tag.trim())
+                                    .filter(Boolean)
+                                    .slice(0, 4)
+                                    .map((tag) => (
+                                        <span key={tag} className="tag">
+                                            {tag}
+                                        </span>
+                                    ))}
+                            </div>
+                        </div>
+                    </button>
                 ))}
-            </ul>
+            </div>
+        </div>
+    );
+
+    return (
+        <div className="roles-catalog">
+            {renderFilters()}
+            {renderContent()}
         </div>
     );
 };
 
-export default RoleSelectPage;
+export default RolesCatalog;
