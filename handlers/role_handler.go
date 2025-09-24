@@ -29,7 +29,7 @@ func (h *RoleHandler) GetRoles(c *gin.Context) {
 	args := make([]interface{}, 0, 3)
 
 	if domain != "" {
-		clauses = append(clauses, fmt.Sprintf("domain = $%d", len(args)+1))
+		clauses = append(clauses, fmt.Sprintf("domain ILIKE $%d", len(args)+1))
 		args = append(args, domain)
 	}
 
