@@ -5,12 +5,16 @@ import (
 	"encoding/base64"
 	json "encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/wuwenbin0122/wwb.ai/config"
 	"github.com/wuwenbin0122/wwb.ai/services"
 	"go.uber.org/zap"
@@ -185,4 +189,196 @@ func jsonRawToString(raw json.RawMessage) string {
 		return ""
 	}
 	return string(raw)
+}
+
+var audioWSUpgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
+// HandleAudioStream establishes a websocket session for streaming audio and issuing TTS requests.
+func (h *AudioHandler) HandleAudioStream(c *gin.Context) {
+	token := strings.TrimSpace(c.Query("token"))
+	if token == "" {
+		token = strings.TrimSpace(h.cfg.QiniuAPIKey)
+	}
+	if token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "qiniu token is required"})
+		return
+	}
+
+	conn, err := audioWSUpgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		h.logger.Warnf("upgrade audio websocket failed: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	writer := &wsWriter{conn: conn}
+
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	defer cancel()
+
+	audioStream := make(chan []byte, 32)
+	var audioClosed int32
+	closeAudio := func() {
+		if atomic.CompareAndSwapInt32(&audioClosed, 0, 1) {
+			close(audioStream)
+		}
+	}
+
+	go func() {
+		err := h.asr.StreamRecognize(ctx, token, audioStream, func(res services.ASRResult) {
+			if strings.TrimSpace(res.Text) == "" {
+				return
+			}
+			if writeErr := writer.WriteJSON(gin.H{
+				"type":     "asr",
+				"text":     res.Text,
+				"is_final": res.IsFinal,
+			}); writeErr != nil {
+				h.logger.Warnf("write asr result failed: %v", writeErr)
+			}
+		})
+
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			h.logger.Warnf("asr stream failed: %v", err)
+			_ = writer.WriteJSON(gin.H{"type": "error", "scope": "asr", "message": "asr processing failed"})
+		}
+
+		_ = writer.WriteJSON(gin.H{"type": "asr_complete"})
+		closeAudio()
+		cancel()
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			closeAudio()
+			return
+		default:
+		}
+
+		messageType, data, readErr := conn.ReadMessage()
+		if readErr != nil {
+			if !websocket.IsCloseError(readErr, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				h.logger.Warnf("audio websocket read error: %v", readErr)
+			}
+			closeAudio()
+			return
+		}
+
+		if messageType == websocket.BinaryMessage {
+			select {
+			case audioStream <- data:
+			case <-ctx.Done():
+			}
+			continue
+		}
+
+		var envelope map[string]interface{}
+		if err := json.Unmarshal(data, &envelope); err != nil {
+			_ = writer.WriteJSON(gin.H{"type": "error", "scope": "client", "message": "invalid message payload"})
+			continue
+		}
+
+		msgType, _ := envelope["type"].(string)
+		switch msgType {
+		case "audio_complete":
+			closeAudio()
+		case "tts_request":
+			text := strings.TrimSpace(getStringField(envelope, "text"))
+			if text == "" {
+				_ = writer.WriteJSON(gin.H{"type": "error", "scope": "tts", "message": "text is required"})
+				continue
+			}
+
+			voice := strings.TrimSpace(getStringField(envelope, "voice_type"))
+			encoding := strings.TrimSpace(getStringField(envelope, "encoding"))
+			speed := getFloatField(envelope, "speed_ratio")
+
+			go h.streamTTS(ctx, writer, token, services.TTSRequest{
+				Text:       text,
+				VoiceType:  voice,
+				Encoding:   encoding,
+				SpeedRatio: speed,
+			})
+		case "ping":
+			_ = writer.WriteJSON(gin.H{"type": "pong"})
+		default:
+			_ = writer.WriteJSON(gin.H{"type": "error", "scope": "client", "message": "unknown message type"})
+		}
+	}
+}
+
+func (h *AudioHandler) streamTTS(ctx context.Context, writer *wsWriter, token string, req services.TTSRequest) {
+	ttsCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	err := h.tts.Synthesize(ttsCtx, token, req, func(chunk services.TTSChunk) {
+		if len(chunk.Audio) == 0 {
+			return
+		}
+
+		encoded := base64.StdEncoding.EncodeToString(chunk.Audio)
+		if writeErr := writer.WriteJSON(gin.H{
+			"type":     "tts",
+			"audio":    encoded,
+			"is_final": chunk.IsFinal,
+		}); writeErr != nil {
+			h.logger.Warnf("write tts chunk failed: %v", writeErr)
+		}
+	})
+
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		h.logger.Warnf("tts stream failed: %v", err)
+		_ = writer.WriteJSON(gin.H{"type": "error", "scope": "tts", "message": "tts processing failed"})
+		return
+	}
+
+	_ = writer.WriteJSON(gin.H{"type": "tts_complete"})
+}
+
+func getStringField(m map[string]interface{}, key string) string {
+	if v, ok := m[key]; ok {
+		switch t := v.(type) {
+		case string:
+			return t
+		case json.Number:
+			return t.String()
+		default:
+			return strings.TrimSpace(fmt.Sprint(t))
+		}
+	}
+	return ""
+}
+
+func getFloatField(m map[string]interface{}, key string) float64 {
+	if v, ok := m[key]; ok {
+		switch t := v.(type) {
+		case float64:
+			return t
+		case json.Number:
+			f, _ := t.Float64()
+			return f
+		case string:
+			f, _ := strconv.ParseFloat(strings.TrimSpace(t), 64)
+			return f
+		}
+	}
+	return 0
+}
+
+type wsWriter struct {
+	mu   sync.Mutex
+	conn *websocket.Conn
+}
+
+func (w *wsWriter) WriteJSON(v interface{}) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.conn.WriteJSON(v)
 }

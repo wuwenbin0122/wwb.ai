@@ -139,6 +139,9 @@ func main() {
 	audioHandler := handlers.NewAudioHandler(cfg, asrService, ttsService, sugar)
 	router.POST("/api/audio/asr", audioHandler.HandleASR)
 	router.POST("/api/audio/tts", audioHandler.HandleTTS)
+	router.GET("/ws/audio", func(c *gin.Context) {
+		audioHandler.HandleAudioStream(c)
+	})
 
 	wsHandler := newWebSocketHandler(sugar)
 	router.GET("/ws", func(c *gin.Context) {

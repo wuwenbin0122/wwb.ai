@@ -1,4 +1,4 @@
-:root {
+﻿:root {
     font-family: Arial, Helvetica, sans-serif;
     background-color: #f5f5f5;
     color: #1f1f1f;
@@ -15,4 +15,34 @@ main {
 
 button {
     cursor: pointer;
+}
+
+.app-shell {
+    min-height: 100vh;
+}
+
+.app-nav {
+    display: flex;
+    gap: 12px;
+    padding: 16px 24px;
+    background-color: #ffffff;
+    border-bottom: 1px solid #e0e0e0;
+}
+
+.app-nav button {
+    padding: 8px 16px;
+    border: 1px solid #d0d0d0;
+    background: #fafafa;
+    border-radius: 6px;
+    font-weight: 600;
+}
+
+.app-nav button.active {
+    background: #1f6feb;
+    color: #ffffff;
+    border-color: #1f6feb;
+}
+
+.app-content {
+    padding: 24px;
 }
