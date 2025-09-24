@@ -15,6 +15,7 @@ import (
 	"github.com/wuwenbin0122/wwb.ai/config"
 	"github.com/wuwenbin0122/wwb.ai/db"
 	"github.com/wuwenbin0122/wwb.ai/handlers"
+	"github.com/wuwenbin0122/wwb.ai/services"
 	"go.uber.org/zap"
 )
 
@@ -132,6 +133,12 @@ func main() {
 
 	roleHandler := handlers.NewRoleHandler(pgPool)
 	router.GET("/api/roles", roleHandler.GetRoles)
+
+	asrService := services.NewASRService(cfg, sugar)
+	ttsService := services.NewTTSService(cfg, sugar)
+	audioHandler := handlers.NewAudioHandler(cfg, asrService, ttsService, sugar)
+	router.POST("/api/audio/asr", audioHandler.HandleASR)
+	router.POST("/api/audio/tts", audioHandler.HandleTTS)
 
 	wsHandler := newWebSocketHandler(sugar)
 	router.GET("/ws", func(c *gin.Context) {
