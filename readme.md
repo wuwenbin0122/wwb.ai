@@ -1,97 +1,147 @@
-# AI 角色扮演聊天机器人
+# AI 角色扮演语音助手
 
-本项目旨在创建一个基于 AI 的角色扮演聊天机器人，允许用户与各种历史、文学、影视等角色进行语音互动。通过语音识别（ASR），自然语言处理（NLP）和语音合成（TTS）技术，用户可以通过语音与角色进行流畅对话。
+基于七牛云语音识别（ASR）与语音合成（TTS）能力构建的实时语音对话体验。用户可以在 Web 端选择预设角色，进行语音输入、字幕查看以及语音播放，整套流程已经按照《AI 角色扮演前端 UI／交互方案 V1》进行了界面与交互重构。
 
-___
+---
+
+## 亮点能力
+
+- **REST 化的语音能力接入**：已替换旧版 WebSocket 流程，统一通过 `https://openai.qiniu.com/v1`（或备用域名）调用七牛云 `/voice/asr`、`/voice/tts`、`/voice/list` 等接口。
+- **三栏实时对话工作台**：左侧角色切换，中部显示字幕与回复气泡，右侧提供音色选择、语速滑块与音频播放器，契合产品设计稿。
+- **音色库与语速配置**：前端可拉取音色列表、试听音色，并在发送 TTS 请求时动态选择音色与语速。
+- **角色目录与发现页**：重构角色目录筛选、热门角色展示及搜索框，支持从“发现/角色目录”一键跳转到实时对话。
+- **可扩展的应用骨架**：保留 MongoDB / PostgreSQL / Redis 依赖注入，方便后续接入会话存档、角色管理等高级能力。
+
+---
 
 ## 技术栈
 
-- **后端**：Go 语言，Gin 框架，WebSocket
-- **语音识别（ASR）**：七牛云语音识别 API
-- **自然语言处理（NLP）**： 通过七牛云 API 调用 doubao-1.5-vision-pro
-- **语音合成（TTS）**：七牛云语音合成 API
-- **数据库**：PostgreSQL（关系型数据库），MongoDB（文档数据库），Redis（缓存）
-- **容器化**：Docker 和 Kubernetes
-- **监控与日志**：Prometheus、Grafana、Zap
-___
-## 功能
+| 层级 | 说明 |
+| --- | --- |
+| 后端 | Go 1.25、Gin、Zap 日志、官方 `net/http` 调用七牛 REST API |
+| 前端 | React + Vite、原子化 CSS（自定义样式表）、Web Audio / AudioWorklet 录音处理 |
+| 数据层 | PostgreSQL、MongoDB、Redis（当前主要用于未来扩展） |
 
-### 核心功能
+---
 
-1. **角色选择与搜索**：
-   - 用户可以根据角色名称、领域（如文学、历史、影视等）、标签（如“幽默”“严肃”）进行搜索，推荐热门角色。
-   
-2. **语音实时聊天**：
-   - 用户通过语音与角色对话，AI 会通过语音识别（STT）转化语音为文字，将文字经过自然语言处理（NLP）后生成的回答通过语音合成（TTS）输出回应。
+## 配置项
 
-3. **角色人设还原**：
-   - AI 根据角色的背景（例如：苏格拉底的反问，哈利波特的魔法术语）还原角色的语气、用词习惯和知识背景。
+在 `config/.env` 或环境变量中设置以下键值：
 
-### 体验增强功能
+```dotenv
+# 数据库与缓存（如未使用可指向测试实例）
+DB_URL=postgres://user:pass@localhost:5432/postgres
+MONGO_URI=mongodb://localhost:27017/local
+REDIS_URL=localhost:6379
 
-1. **聊天记录保存与回溯**：
-   - 用户可以查看或回放历史对话，收藏精彩对话片段。
+# 七牛云语音能力
+QINIU_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+QINIU_API_BASE_URL=https://openai.qiniu.com/v1   # 可切换为 https://api.qnaigc.com/v1
+QINIU_TTS_VOICE_TYPE=qiniu_zh_female_tmjxxy      # 默认音色
+QINIU_TTS_FORMAT=mp3                             # 默认音频编码，可选 ogg等
+QINIU_ASR_MODEL=asr                              # 当前官方模型名
 
-2. **多语言支持**：
-   - 角色能够在多种语言下进行互动，例如：莎士比亚可以用中文讨论戏剧。
-
-3. **角色状态调整**：
-   - 用户可以调整角色的“活跃度”“严肃度”，例如让“鲁迅”变得更加温和或更加犀利。
-___
-## 安装与运行
-
-### 1. 克隆项目
-
-```bash
-git clone git@github.com:wuwenbin0122/wwb.ai.git
-cd wwb.ai
+# 服务监听地址
+SERVER_ADDR=:8080
 ```
 
-### 2. 安装依赖
+> 若环境变量缺失，程序会尝试读取 `config/.env` 文件；数据库配置仍为必填，以便保持与既有业务兼容。
 
-确保您已安装 Go 1.18 及以上版本，运行以下命令安装 Go 依赖：
+---
+
+## 启动指南
+
+### 1. 初始化依赖
 
 ```bash
 go mod tidy
+cd web
+npm install
 ```
 
-### 3. 配置环境变量
-
-确保您配置了七牛云的 API 密钥、数据库连接等环境变量。可以在 `.env` 文件中设置环境变量：
-
-```bash
-DB_USER=your_user
-DB_PASSWORD=your_password
-DB_NAME=your_db
-QINIU_API_KEY=your_qiniu_api_key
-QINIU_NLP_ENDPOINT=https://openai.qiniu.com/v1/chat/completions
-QINIU_TTS_ENDPOINT=https://openai.qiniu.com/v1/tts
-QINIU_ASR_ENDPOINT=https://openai.qiniu.com/v1/voice/asr
-
-```
-
-### 4. 启动后端服务
-
-运行以下命令启动 Go 后端服务：
+### 2. 启动后端
 
 ```bash
 go run cmd/server/main.go
 ```
 
-后端服务将在 `http://localhost:8080` 上运行。
+默认监听 `http://localhost:8080`，提供以下接口：
 
-### 5. 启动前端服务
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET`  | `/api/roles`          | 角色目录查询（支持 `domain`、`tags`） |
+| `POST` | `/api/audio/asr`      | 提交音频（Base64 或 URL）并获取转写文本 |
+| `POST` | `/api/audio/tts`      | 文本合成语音，返回 Base64 音频串 |
+| `GET`  | `/api/audio/voices`   | 拉取七牛官方音色列表 |
+| `GET`  | `/health`             | 健康检查 |
 
-前端由 AI 辅助完成，您可以通过以下命令启动前端开发环境：
+### 3. 启动前端
 
 ```bash
 cd web
-npm install
-npm start
+npm run dev
 ```
 
-前端将会在 `http://localhost:3000` 上运行。
-___
-## 许可证
+开发环境默认监听 `http://localhost:5173`。构建产物可通过 `npm run build` 生成。
 
-本项目遵循 Apache-2.0  许可证，详细信息请查看 [LICENSE](./LICENSE) 文件。
+---
+
+## 前端交互速览
+
+- **发现页**：渐变背景的 Hero 区、热门角色九宫格、快捷跳转按钮。
+- **角色目录**：左侧筛选域、右侧响应式卡片列表，展示筛选 Chip、结果总数。
+- **实时对话**：三列布局 —— 角色列表、字幕聊天流、音色/语速配置，并展示录音状态、错误信息和音频播放器。
+- **音色库**：右侧面板支持刷新音色列表，提供试听链接与快速选择。
+- **设置 / 历史**：按设计稿提供占位模块，便于后续接入账号、设备测试与对话回放。
+
+---
+
+## 接口示例
+
+### 语音识别（后端会转发至七牛）
+
+```bash
+curl -X POST http://localhost:8080/api/audio/asr \
+  -H "Content-Type: application/json" \
+  -d '{
+        "audio_format": "wav",
+        "audio_data": "<Base64>"
+      }'
+```
+
+响应体将包含：
+
+```json
+{
+  "reqid": "...",
+  "text": "识别出的文本",
+  "duration_ms": 1673,
+  "raw": { "reqid": "...", "data": { ... } }
+}
+```
+
+### 语音合成
+
+```bash
+curl -X POST http://localhost:8080/api/audio/tts \
+  -H "Content-Type: application/json" \
+  -d '{
+        "text": "你好，世界！",
+        "voice_type": "qiniu_zh_female_tmjxxy",
+        "encoding": "mp3",
+        "speed_ratio": 1.0
+      }'
+```
+
+成功时会返回 Base64 编码的音频数据，可直接在浏览器或前端转为可播放的 Blob。
+
+---
+
+## 后续规划
+
+- 会话记录与收藏：结合 Redis/MongoDB 实现历史对话时间线及片段收藏。
+- 角色管理后台：为运营/创作者提供 Prompt 片段、技能配置等管理界面。
+- 多模态能力：结合七牛图片 / 视频 API 打造更丰富的互动形式。
+
+欢迎提交 Issue 或 Pull Request 与我们共同完善体验。
+
