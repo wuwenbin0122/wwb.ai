@@ -1,28 +1,20 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
-	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/wuwenbin0122/wwb.ai/config"
 	"go.uber.org/zap"
 )
 
-// TTSChunk represents an audio segment emitted by the TTS service.
-type TTSChunk struct {
-	Audio   []byte          `json:"audio"`
-	IsFinal bool            `json:"is_final"`
-	Raw     json.RawMessage `json:"raw"`
-}
-
-// TTSRequest contains the parameters for a synthesis call.
+// TTSRequest encapsulates a synthesis task forwarded to Qiniu.
 type TTSRequest struct {
 	Text       string
 	VoiceType  string
@@ -30,59 +22,92 @@ type TTSRequest struct {
 	SpeedRatio float64
 }
 
-// TTSService manages websocket sessions with the Qiniu TTS endpoint.
-type TTSService struct {
-	endpoint     string
-	defaultVoice string
-	dialer       *websocket.Dialer
-	logger       *zap.SugaredLogger
+// TTSResult is the simplified response returned to the caller.
+type TTSResult struct {
+	ReqID    string          `json:"reqid"`
+	Audio    []byte          `json:"audio"`
+	Duration string          `json:"duration"`
+	Raw      json.RawMessage `json:"raw"`
 }
 
-// NewTTSService constructs a new TTSService instance.
-func NewTTSService(cfg *config.Config, logger *zap.SugaredLogger) *TTSService {
-	dialer := *websocket.DefaultDialer
-	dialer.HandshakeTimeout = 10 * time.Second
+// VoiceInfo describes a voice returned by /voice/list.
+type VoiceInfo struct {
+	VoiceName string `json:"voice_name"`
+	VoiceType string `json:"voice_type"`
+	URL       string `json:"url"`
+	Category  string `json:"category"`
+	UpdateMS  int64  `json:"updatetime"`
+}
 
-	voice := cfg.QiniuTTSVoiceType
-	if strings.TrimSpace(voice) == "" {
+type ttsService struct {
+	baseURL       string
+	defaultVoice  string
+	defaultFormat string
+	client        httpDoer
+	logger        *zap.SugaredLogger
+}
+
+// TTSService exposes convenience wrappers over Qiniu's RESTful TTS API.
+type TTSService struct {
+	inner *ttsService
+}
+
+// NewTTSService constructs a TTSService configured with defaults from cfg.
+func NewTTSService(cfg *config.Config, logger *zap.SugaredLogger) *TTSService {
+	base := strings.TrimRight(cfg.QiniuAPIBaseURL, "/")
+	if base == "" {
+		base = "https://openai.qiniu.com/v1"
+	}
+
+	voice := strings.TrimSpace(cfg.QiniuTTSVoiceType)
+	if voice == "" {
 		voice = "qiniu_zh_female_tmjxxy"
 	}
 
+	format := strings.TrimSpace(cfg.QiniuTTSFormat)
+	if format == "" {
+		format = "mp3"
+	}
+
 	return &TTSService{
-		endpoint:     cfg.QiniuTTSEndpoint,
-		defaultVoice: voice,
-		dialer:       &dialer,
-		logger:       logger,
+		inner: &ttsService{
+			baseURL:       base,
+			defaultVoice:  voice,
+			defaultFormat: format,
+			client:        newDefaultHTTPClient(),
+			logger:        logger,
+		},
 	}
 }
 
-// Synthesize streams a textual request to the TTS endpoint and emits audio chunks via the callback.
-func (s *TTSService) Synthesize(
-	ctx context.Context,
-	token string,
-	req TTSRequest,
-	onChunk func(TTSChunk),
-) error {
-	if s.endpoint == "" {
-		return errors.New("tts endpoint is not configured")
+// Synthesize sends text-to-speech request to Qiniu and returns the synthesized audio bytes.
+func (s *TTSService) Synthesize(ctx context.Context, token string, req TTSRequest) (*TTSResult, error) {
+	return s.inner.synthesize(ctx, token, req)
+}
+
+// ListVoices fetches available TTS voices.
+func (s *TTSService) ListVoices(ctx context.Context, token string) ([]VoiceInfo, error) {
+	return s.inner.listVoices(ctx, token)
+}
+
+func (s *ttsService) synthesize(ctx context.Context, token string, req TTSRequest) (*TTSResult, error) {
+	if strings.TrimSpace(token) == "" {
+		return nil, fmt.Errorf("authorization token is required")
 	}
 
-	if token == "" {
-		return errors.New("authorization token is required")
+	text := strings.TrimSpace(req.Text)
+	if text == "" {
+		return nil, fmt.Errorf("tts text cannot be empty")
 	}
 
-	if strings.TrimSpace(req.Text) == "" {
-		return errors.New("tts request text is empty")
-	}
-
-	voice := req.VoiceType
-	if strings.TrimSpace(voice) == "" {
+	voice := strings.TrimSpace(req.VoiceType)
+	if voice == "" {
 		voice = s.defaultVoice
 	}
 
-	encoding := req.Encoding
-	if strings.TrimSpace(encoding) == "" {
-		encoding = "mp3"
+	encoding := strings.TrimSpace(req.Encoding)
+	if encoding == "" {
+		encoding = s.defaultFormat
 	}
 
 	speed := req.SpeedRatio
@@ -97,75 +122,112 @@ func (s *TTSService) Synthesize(
 			"speed_ratio": speed,
 		},
 		"request": map[string]interface{}{
-			"text": req.Text,
+			"text": text,
 		},
 	}
 
-	msg, err := json.Marshal(payload)
+	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal tts payload: %w", err)
+		return nil, fmt.Errorf("marshal tts payload: %w", err)
 	}
 
-	header := http.Header{}
-	header.Set("Authorization", "Bearer "+token)
-
-	conn, _, err := s.dialer.DialContext(ctx, s.endpoint, header)
+	endpoint := s.baseURL + "/voice/tts"
+	reqHTTP, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("dial tts websocket: %w", err)
-	}
-	defer conn.Close()
-
-	if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
-		return fmt.Errorf("send tts request: %w", err)
+		return nil, fmt.Errorf("create tts request: %w", err)
 	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
+	reqHTTP.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+	reqHTTP.Header.Set("Content-Type", "application/json")
 
-		messageType, payloadBytes, readErr := conn.ReadMessage()
-		if readErr != nil {
-			return fmt.Errorf("read tts message: %w", readErr)
-		}
-
-		if messageType != websocket.TextMessage && messageType != websocket.BinaryMessage {
-			continue
-		}
-
-		var envelope map[string]interface{}
-		if err := json.Unmarshal(payloadBytes, &envelope); err != nil {
-			s.logger.Warnf("unmarshal tts payload failed: %v", err)
-			continue
-		}
-
-		data, _ := envelope["data"].(string)
-		if data == "" {
-			continue
-		}
-
-		audioBytes, decodeErr := base64.StdEncoding.DecodeString(data)
-		if decodeErr != nil {
-			s.logger.Warnf("decode tts audio chunk failed: %v", decodeErr)
-			continue
-		}
-
-		isFinal, _ := envelope["is_final"].(bool)
-
-		if onChunk != nil {
-			onChunk(TTSChunk{
-				Audio:   audioBytes,
-				IsFinal: isFinal,
-				Raw:     append(json.RawMessage(nil), payloadBytes...),
-			})
-		}
-
-		// termination condition: service signals completion
-		status, _ := envelope["status"].(string)
-		if strings.EqualFold(status, "completed") || isFinal {
-			return nil
-		}
+	resp, err := s.client.Do(reqHTTP)
+	if err != nil {
+		return nil, fmt.Errorf("call tts api: %w", err)
 	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read tts response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, buildQiniuAPIError(resp.StatusCode, respBody)
+	}
+
+	var envelope ttsAPIResponse
+	if err := json.Unmarshal(respBody, &envelope); err != nil {
+		return nil, fmt.Errorf("decode tts response: %w", err)
+	}
+
+	if envelope.Error != nil && envelope.Error.Message != "" {
+		return nil, fmt.Errorf("qiniu tts error: %s", envelope.Error.Message)
+	}
+
+	if envelope.Data == "" {
+		return nil, fmt.Errorf("tts response contained no audio data")
+	}
+
+	audio, err := base64.StdEncoding.DecodeString(envelope.Data)
+	if err != nil {
+		return nil, fmt.Errorf("decode tts audio: %w", err)
+	}
+
+	result := &TTSResult{
+		ReqID:    envelope.ReqID,
+		Audio:    audio,
+		Duration: envelope.Addition.Duration,
+		Raw:      json.RawMessage(respBody),
+	}
+
+	return result, nil
+}
+
+func (s *ttsService) listVoices(ctx context.Context, token string) ([]VoiceInfo, error) {
+	if strings.TrimSpace(token) == "" {
+		return nil, fmt.Errorf("authorization token is required")
+	}
+
+	endpoint := s.baseURL + "/voice/list"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create voice list request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("call voice list api: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read voice list response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, buildQiniuAPIError(resp.StatusCode, body)
+	}
+
+	var voices []VoiceInfo
+	if err := json.Unmarshal(body, &voices); err != nil {
+		return nil, fmt.Errorf("decode voice list response: %w", err)
+	}
+
+	return voices, nil
+}
+
+type ttsAPIResponse struct {
+	ReqID     string         `json:"reqid"`
+	Operation string         `json:"operation"`
+	Sequence  int            `json:"sequence"`
+	Data      string         `json:"data"`
+	Addition  ttsAddition    `json:"addition"`
+	Error     *qiniuAPIError `json:"error,omitempty"`
+}
+
+type ttsAddition struct {
+	Duration string `json:"duration"`
 }
