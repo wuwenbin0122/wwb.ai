@@ -20,6 +20,7 @@ type Config struct {
 	QiniuAPIKey       string
 	QiniuTTSEndpoint  string
 	QiniuTTSVoiceType string
+	QiniuASREndpoint  string
 }
 
 var (
@@ -44,6 +45,7 @@ func Load() (*Config, error) {
 			QiniuAPIKey:       strings.TrimSpace(os.Getenv("QINIU_API_KEY")),
 			QiniuTTSEndpoint:  strings.TrimSpace(os.Getenv("QINIU_TTS_ENDPOINT")),
 			QiniuTTSVoiceType: strings.TrimSpace(os.Getenv("QINIU_TTS_VOICE_TYPE")),
+			QiniuASREndpoint:  strings.TrimSpace(os.Getenv("QINIU_ASR_ENDPOINT")),
 		}
 
 		loadErr = cfg.validate()
