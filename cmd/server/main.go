@@ -11,7 +11,6 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
 	"github.com/wuwenbin0122/wwb.ai/config"
 	"github.com/wuwenbin0122/wwb.ai/db"
 	"github.com/wuwenbin0122/wwb.ai/handlers"
@@ -19,58 +18,12 @@ import (
 	"go.uber.org/zap"
 )
 
-type webSocketHandler struct {
-	upgrader websocket.Upgrader
-	logger   *zap.SugaredLogger
-}
-
-func newWebSocketHandler(logger *zap.SugaredLogger) *webSocketHandler {
-	return &webSocketHandler{
-		upgrader: websocket.Upgrader{
-			ReadBufferSize:  1024,
-			WriteBufferSize: 1024,
-			CheckOrigin: func(r *http.Request) bool {
-				return true
-			},
-		},
-		logger: logger,
-	}
-}
-
-func (h *webSocketHandler) handle(w http.ResponseWriter, r *http.Request) {
-	conn, err := h.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		h.logger.Errorf("upgrade websocket: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	h.logger.Infof("websocket client connected: %s", r.RemoteAddr)
-
-	for {
-		messageType, payload, err := conn.ReadMessage()
-		if err != nil {
-			if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				h.logger.Warnf("read websocket message: %v", err)
-			}
-			break
-		}
-
-		if err := conn.WriteMessage(messageType, payload); err != nil {
-			h.logger.Warnf("write websocket message: %v", err)
-			break
-		}
-	}
-
-	h.logger.Infof("websocket client disconnected: %s", r.RemoteAddr)
-}
-
 func main() {
 	logger, err := zap.NewProduction()
 	if err != nil {
 		panic(err)
 	}
-	defer logger.Sync() // ignore error caused by stdout/stderr being closed
+	defer logger.Sync()
 
 	sugar := logger.Sugar()
 
@@ -139,14 +92,7 @@ func main() {
 	audioHandler := handlers.NewAudioHandler(cfg, asrService, ttsService, sugar)
 	router.POST("/api/audio/asr", audioHandler.HandleASR)
 	router.POST("/api/audio/tts", audioHandler.HandleTTS)
-	router.GET("/ws/audio", func(c *gin.Context) {
-		audioHandler.HandleAudioStream(c)
-	})
-
-	wsHandler := newWebSocketHandler(sugar)
-	router.GET("/ws", func(c *gin.Context) {
-		wsHandler.handle(c.Writer, c.Request)
-	})
+	router.GET("/api/audio/voices", audioHandler.HandleVoiceList)
 
 	server := &http.Server{
 		Addr:    cfg.ServerAddr,
