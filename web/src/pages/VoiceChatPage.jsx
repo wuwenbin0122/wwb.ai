@@ -199,6 +199,7 @@ const VoiceChatPage = ({
             audioContextRef.current.close();
             audioContextRef.current = null;
         }
+        workletLoadedRef.current = false;
     }, []);
 
     useEffect(() => () => cleanupRecording(), [cleanupRecording]);
@@ -206,6 +207,7 @@ const VoiceChatPage = ({
     const ensureAudioContext = useCallback(async () => {
         if (!audioContextRef.current) {
             audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_SAMPLE_RATE });
+            workletLoadedRef.current = false;
         }
 
         const audioContext = audioContextRef.current;
