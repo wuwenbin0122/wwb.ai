@@ -1,0 +1,5 @@
+ALTER TABLE roles
+    ADD COLUMN IF NOT EXISTS personality JSONB DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS background TEXT,
+    ADD COLUMN IF NOT EXISTS languages TEXT[] DEFAULT ARRAY['zh','en'],
+    ADD COLUMN IF NOT EXISTS skills JSONB DEFAULT '[]'::jsonb;

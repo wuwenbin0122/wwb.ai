@@ -24,7 +24,7 @@ func (h *RoleHandler) GetRoles(c *gin.Context) {
 	domain := strings.TrimSpace(c.Query("domain"))
 	tagsParam := strings.TrimSpace(c.Query("tags"))
 
-	baseQuery := `SELECT id, name, domain, tags, bio FROM roles`
+	baseQuery := `SELECT id, name, domain, tags, bio, personality, background, languages, skills FROM roles`
 	clauses := make([]string, 0, 2)
 	args := make([]interface{}, 0, 3)
 
@@ -67,7 +67,7 @@ func (h *RoleHandler) GetRoles(c *gin.Context) {
 	roles := make([]models.Role, 0)
 	for rows.Next() {
 		var role models.Role
-		if err := rows.Scan(&role.ID, &role.Name, &role.Domain, &role.Tags, &role.Bio); err != nil {
+		if err := rows.Scan(&role.ID, &role.Name, &role.Domain, &role.Tags, &role.Bio, &role.Personality, &role.Background, &role.Languages, &role.Skills); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "scan role failed"})
 			return
 		}
