@@ -22,24 +22,21 @@ const (
 	maxSummaryRuneLength     = 120
 )
 
-// ChatMessage mirrors OpenAI/Qiniu chat message payloads.
-type ChatMessage struct {
+type NLPMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
-// ChatUsage contains token usage metadata returned by Qiniu's API.
-type ChatUsage struct {
+type NLPUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 }
 
-// ChatRequest describes a prompt orchestration operation.
-type ChatRequest struct {
+type NLPRequest struct {
 	Role               models.Role
 	Language           string
-	History            []ChatMessage
+	History            []NLPMessage
 	UserMessage        string
 	EnabledSkillIDs    []string
 	SummaryThreshold   int
@@ -48,27 +45,24 @@ type ChatRequest struct {
 	MaxTokens          int
 }
 
-// ChatResponse wraps the assistant reply and debug metadata.
-type ChatResponse struct {
-	Reply           ChatMessage     `json:"reply"`
-	Usage           *ChatUsage      `json:"usage,omitempty"`
+type NLPResponse struct {
+	Reply           NLPMessage      `json:"reply"`
+	Usage           *NLPUsage       `json:"usage,omitempty"`
 	Raw             json.RawMessage `json:"raw,omitempty"`
-	PromptMessages  []ChatMessage   `json:"prompt_messages"`
+	PromptMessages  []NLPMessage    `json:"prompt_messages"`
 	SystemPrompt    string          `json:"system_prompt"`
 	HistorySummary  string          `json:"history_summary"`
 	EnabledSkillIDs []string        `json:"enabled_skill_ids"`
 }
 
-// ChatService handles prompt composition plus Qiniu chat completions.
-type ChatService struct {
+type NLPService struct {
 	baseURL string
 	model   string
 	client  httpDoer
 	logger  *zap.SugaredLogger
 }
 
-// NewChatService constructs a ChatService initialized from cfg.
-func NewChatService(cfg *config.Config, logger *zap.SugaredLogger) *ChatService {
+func NewNLPService(cfg *config.Config, logger *zap.SugaredLogger) *NLPService {
 	base := strings.TrimRight(cfg.QiniuAPIBaseURL, "/")
 	if base == "" {
 		base = "https://openai.qiniu.com/v1"
@@ -79,7 +73,7 @@ func NewChatService(cfg *config.Config, logger *zap.SugaredLogger) *ChatService 
 		model = "doubao-1.5-vision-pro"
 	}
 
-	return &ChatService{
+	return &NLPService{
 		baseURL: base,
 		model:   model,
 		client:  newDefaultHTTPClient(),
@@ -87,8 +81,7 @@ func NewChatService(cfg *config.Config, logger *zap.SugaredLogger) *ChatService 
 	}
 }
 
-// GenerateReply builds a structured prompt and forwards it to Qiniu's chat completion API.
-func (s *ChatService) GenerateReply(ctx context.Context, token string, req ChatRequest) (*ChatResponse, error) {
+func (s *NLPService) GenerateReply(ctx context.Context, token string, req NLPRequest) (*NLPResponse, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return nil, fmt.Errorf("authorization token is required")
@@ -147,26 +140,26 @@ func (s *ChatService) GenerateReply(ctx context.Context, token string, req ChatR
 
 	historySummary, preservedHistory := splitHistory(req.History, summaryThreshold, recentKeep, req.Role.Name)
 
-	promptMessages := make([]ChatMessage, 0, 2+len(preservedHistory))
-	promptMessages = append(promptMessages, ChatMessage{Role: "system", Content: systemPrompt})
+	promptMessages := make([]NLPMessage, 0, 2+len(preservedHistory))
+	promptMessages = append(promptMessages, NLPMessage{Role: "system", Content: systemPrompt})
 	if historySummary != "" {
-		promptMessages = append(promptMessages, ChatMessage{Role: "system", Content: "历史摘要：\n" + historySummary})
+		promptMessages = append(promptMessages, NLPMessage{Role: "system", Content: "历史摘要：\n" + historySummary})
 	}
 	promptMessages = append(promptMessages, preservedHistory...)
-	promptMessages = append(promptMessages, ChatMessage{Role: "user", Content: userInput})
+	promptMessages = append(promptMessages, NLPMessage{Role: "user", Content: userInput})
 
-	chatPayload := chatAPIRequest{
+	requestPayload := nlpAPIRequest{
 		Model:    s.model,
 		Messages: promptMessages,
 	}
 	if req.Temperature > 0 {
-		chatPayload.Temperature = req.Temperature
+		requestPayload.Temperature = req.Temperature
 	}
 	if req.MaxTokens > 0 {
-		chatPayload.MaxTokens = req.MaxTokens
+		requestPayload.MaxTokens = req.MaxTokens
 	}
 
-	body, err := json.Marshal(chatPayload)
+	body, err := json.Marshal(requestPayload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal chat payload: %w", err)
 	}
@@ -195,7 +188,7 @@ func (s *ChatService) GenerateReply(ctx context.Context, token string, req ChatR
 		return nil, buildQiniuAPIError(response.StatusCode, respBody)
 	}
 
-	var apiResp chatAPIResponse
+	var apiResp nlpAPIResponse
 	if err := json.Unmarshal(respBody, &apiResp); err != nil {
 		return nil, fmt.Errorf("decode chat response: %w", err)
 	}
@@ -213,7 +206,7 @@ func (s *ChatService) GenerateReply(ctx context.Context, token string, req ChatR
 		reply.Role = "assistant"
 	}
 
-	result := &ChatResponse{
+	result := &NLPResponse{
 		Reply:           reply,
 		Usage:           apiResp.Usage,
 		Raw:             json.RawMessage(respBody),
@@ -362,8 +355,8 @@ func filterNonEmpty(values []string) []string {
 	return result
 }
 
-func splitHistory(history []ChatMessage, threshold, recentKeep int, assistantName string) (string, []ChatMessage) {
-	cleaned := make([]ChatMessage, 0, len(history))
+func splitHistory(history []NLPMessage, threshold, recentKeep int, assistantName string) (string, []NLPMessage) {
+	cleaned := make([]NLPMessage, 0, len(history))
 	for _, msg := range history {
 		content := strings.TrimSpace(msg.Content)
 		role := strings.TrimSpace(msg.Role)
@@ -373,7 +366,7 @@ func splitHistory(history []ChatMessage, threshold, recentKeep int, assistantNam
 		if role == "" {
 			role = "user"
 		}
-		cleaned = append(cleaned, ChatMessage{Role: role, Content: content})
+		cleaned = append(cleaned, NLPMessage{Role: role, Content: content})
 	}
 
 	if threshold <= 0 || len(cleaned) <= threshold {
@@ -393,12 +386,12 @@ func splitHistory(history []ChatMessage, threshold, recentKeep int, assistantNam
 	}
 
 	summary := summariseMessages(cleaned[:summaryCutoff], assistantName)
-	preserved := append([]ChatMessage(nil), cleaned[summaryCutoff:]...)
+	preserved := append([]NLPMessage(nil), cleaned[summaryCutoff:]...)
 
 	return summary, preserved
 }
 
-func summariseMessages(messages []ChatMessage, assistantName string) string {
+func summariseMessages(messages []NLPMessage, assistantName string) string {
 	if len(messages) == 0 {
 		return ""
 	}
@@ -498,24 +491,24 @@ func applySkillHooks(enabledIDs []string, userInput string) ([]string, string) {
 	return filterNonEmpty(directives), modified
 }
 
-type chatAPIRequest struct {
-	Model       string        `json:"model"`
-	Messages    []ChatMessage `json:"messages"`
-	Temperature float64       `json:"temperature,omitempty"`
-	MaxTokens   int           `json:"max_tokens,omitempty"`
+type nlpAPIRequest struct {
+	Model       string       `json:"model"`
+	Messages    []NLPMessage `json:"messages"`
+	Temperature float64      `json:"temperature,omitempty"`
+	MaxTokens   int          `json:"max_tokens,omitempty"`
 }
 
-type chatAPIChoice struct {
-	Index        int         `json:"index"`
-	Message      ChatMessage `json:"message"`
-	FinishReason string      `json:"finish_reason"`
+type nlpAPIChoice struct {
+	Index        int        `json:"index"`
+	Message      NLPMessage `json:"message"`
+	FinishReason string     `json:"finish_reason"`
 }
 
-type chatAPIResponse struct {
-	ID      string          `json:"id"`
-	Object  string          `json:"object"`
-	Created int64           `json:"created"`
-	Choices []chatAPIChoice `json:"choices"`
-	Usage   *ChatUsage      `json:"usage"`
-	Error   *qiniuAPIError  `json:"error,omitempty"`
+type nlpAPIResponse struct {
+	ID      string         `json:"id"`
+	Object  string         `json:"object"`
+	Created int64          `json:"created"`
+	Choices []nlpAPIChoice `json:"choices"`
+	Usage   *NLPUsage      `json:"usage"`
+	Error   *qiniuAPIError `json:"error,omitempty"`
 }

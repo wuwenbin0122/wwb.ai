@@ -71,7 +71,7 @@ go run cmd/server/main.go
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET`  | `/api/roles`          | 角色目录查询（支持 `domain`、`tags`） |
-| `POST` | `/api/chat/completions` | 组合系统提示并转发至七牛大模型，返回助手回复 |
+| `POST` | `/api/nlp/chat`        | 组合系统提示并转发至七牛大模型，返回助手回复 |
 | `POST` | `/api/audio/asr`      | 提交音频（Base64 或 URL）并获取转写文本 |
 | `POST` | `/api/audio/tts`      | 文本合成语音，返回 Base64 音频串 |
 | `GET`  | `/api/audio/voices`   | 拉取七牛官方音色列表 |

@@ -14,39 +14,36 @@ import (
 	"go.uber.org/zap"
 )
 
-// ChatHandler provides prompt orchestration endpoints for LLM interactions.
-type ChatHandler struct {
+type NLPHandler struct {
 	cfg    *config.Config
 	pool   *pgxpool.Pool
-	chat   *services.ChatService
+	nlp    *services.NLPService
 	logger *zap.SugaredLogger
 }
 
-// NewChatHandler wires dependencies for chat completions.
-func NewChatHandler(cfg *config.Config, pool *pgxpool.Pool, chat *services.ChatService, logger *zap.SugaredLogger) *ChatHandler {
-	return &ChatHandler{cfg: cfg, pool: pool, chat: chat, logger: logger}
+func NewNLPHandler(cfg *config.Config, pool *pgxpool.Pool, nlp *services.NLPService, logger *zap.SugaredLogger) *NLPHandler {
+	return &NLPHandler{cfg: cfg, pool: pool, nlp: nlp, logger: logger}
 }
 
-type chatMessagePayload struct {
+type nlpMessagePayload struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
-type chatRequestPayload struct {
-	Token             string               `json:"token"`
-	RoleID            int64                `json:"role_id"`
-	Language          string               `json:"language"`
-	Messages          []chatMessagePayload `json:"messages"`
-	EnabledSkillIDs   []string             `json:"enabled_skill_ids"`
-	SummaryThreshold  int                  `json:"summary_threshold"`
-	RecentMessageKeep int                  `json:"recent_message_keep"`
-	Temperature       float64              `json:"temperature"`
-	MaxTokens         int                  `json:"max_tokens"`
+type nlpRequestPayload struct {
+	Token             string              `json:"token"`
+	RoleID            int64               `json:"role_id"`
+	Language          string              `json:"language"`
+	Messages          []nlpMessagePayload `json:"messages"`
+	EnabledSkillIDs   []string            `json:"enabled_skill_ids"`
+	SummaryThreshold  int                 `json:"summary_threshold"`
+	RecentMessageKeep int                 `json:"recent_message_keep"`
+	Temperature       float64             `json:"temperature"`
+	MaxTokens         int                 `json:"max_tokens"`
 }
 
-// HandleChatCompletion composes system prompts and proxies chat completions.
-func (h *ChatHandler) HandleChatCompletion(c *gin.Context) {
-	var payload chatRequestPayload
+func (h *NLPHandler) HandleChat(c *gin.Context) {
+	var payload nlpRequestPayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload", "detail": err.Error()})
 		return
@@ -57,7 +54,7 @@ func (h *ChatHandler) HandleChatCompletion(c *gin.Context) {
 		return
 	}
 
-	messages := normalizeChatMessages(payload.Messages)
+	messages := normalizeNLPMessages(payload.Messages)
 	if len(messages) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "at least one message is required"})
 		return
@@ -87,7 +84,7 @@ func (h *ChatHandler) HandleChatCompletion(c *gin.Context) {
 
 	history := messages[:len(messages)-1]
 
-	chatReq := services.ChatRequest{
+	req := services.NLPRequest{
 		Role:               *role,
 		Language:           language,
 		History:            history,
@@ -105,9 +102,9 @@ func (h *ChatHandler) HandleChatCompletion(c *gin.Context) {
 		return
 	}
 
-	result, err := h.chat.GenerateReply(c.Request.Context(), token, chatReq)
+	result, err := h.nlp.GenerateReply(c.Request.Context(), token, req)
 	if err != nil {
-		h.logger.Warnf("chat completion failed: %v", err)
+		h.logger.Warnf("nlp chat failed: %v", err)
 		c.JSON(statusFromError(err), gin.H{"error": "chat completion failed", "detail": err.Error()})
 		return
 	}
@@ -125,8 +122,8 @@ func (h *ChatHandler) HandleChatCompletion(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-func normalizeChatMessages(payload []chatMessagePayload) []services.ChatMessage {
-	result := make([]services.ChatMessage, 0, len(payload))
+func normalizeNLPMessages(payload []nlpMessagePayload) []services.NLPMessage {
+	result := make([]services.NLPMessage, 0, len(payload))
 	for _, msg := range payload {
 		content := strings.TrimSpace(msg.Content)
 		if content == "" {
@@ -136,12 +133,12 @@ func normalizeChatMessages(payload []chatMessagePayload) []services.ChatMessage 
 		if role == "" {
 			role = "user"
 		}
-		result = append(result, services.ChatMessage{Role: role, Content: content})
+		result = append(result, services.NLPMessage{Role: role, Content: content})
 	}
 	return result
 }
 
-func (h *ChatHandler) resolveToken(c *gin.Context, explicit string) string {
+func (h *NLPHandler) resolveToken(c *gin.Context, explicit string) string {
 	if token := strings.TrimSpace(explicit); token != "" {
 		return token
 	}
