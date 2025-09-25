@@ -155,7 +155,6 @@ const VoiceChatPage = ({
     const workletLoadedRef = useRef(false);
     const workletNodeRef = useRef(null);
     const mediaStreamRef = useRef(null);
-    const processorRef = useRef(null);
     const recordedChunksRef = useRef([]);
 
     const [pendingStart, setPendingStart] = useState(false);
@@ -182,10 +181,6 @@ const VoiceChatPage = ({
     const selectedRole = useMemo(() => roles.find((role) => role.id === selectedRoleId) || null, [roles, selectedRoleId]);
 
     const cleanupRecording = useCallback(() => {
-        if (processorRef.current) {
-            processorRef.current.disconnect();
-            processorRef.current = null;
-        }
         if (workletNodeRef.current) {
             workletNodeRef.current.port.postMessage({ type: "STOP" });
             workletNodeRef.current.disconnect();
@@ -227,8 +222,19 @@ const VoiceChatPage = ({
 
             workletNode.port.onmessage = (event) => {
                 const { data } = event;
-                if (data?.type === "PCM") {
-                    recordedChunksRef.current.push(new Int16Array(data.payload));
+                if (!data || data.type !== "PCM" || !data.payload) {
+                    return;
+                }
+
+                const floatBuffer = new Float32Array(data.payload);
+                if (!floatBuffer.length) {
+                    return;
+                }
+
+                const sourceRate = typeof data.sampleRate === "number" && data.sampleRate > 0 ? data.sampleRate : audioContext.sampleRate;
+                const resampled = downsampleFloat32(floatBuffer, sourceRate);
+                if (resampled && resampled.length > 0) {
+                    recordedChunksRef.current.push(resampled);
                 }
             };
             workletNodeRef.current = workletNode;
@@ -237,14 +243,28 @@ const VoiceChatPage = ({
         return audioContext;
     }, []);
 
-    const sendASRRequest = useCallback(async (base64Audio) => {
+    const sendASRRequest = useCallback(async (base64Audio, expectedDurationMs = 0) => {
+        const computedTimeout = (() => {
+            if (!expectedDurationMs || expectedDurationMs <= 0) {
+                return 0;
+            }
+            const expanded = Math.round(expectedDurationMs * 4);
+            return Math.max(120000, Math.min(300000, expanded));
+        })();
+
+        const payload = {
+            audio_data: base64Audio,
+            audio_format: "wav",
+        };
+
+        if (computedTimeout > 0) {
+            payload.timeout_ms = computedTimeout;
+        }
+
         const response = await fetch(`${API_BASE}/api/audio/asr`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                audio_data: base64Audio,
-                audio_format: "wav",
-            }),
+            body: JSON.stringify(payload),
         });
 
         const data = await response.json();
@@ -284,20 +304,14 @@ const VoiceChatPage = ({
 
             const source = audioContext.createMediaStreamSource(stream);
             const workletNode = workletNodeRef.current;
-            const processor = audioContext.createScriptProcessor(4096, 1, 1);
+            if (!workletNode) {
+                throw new Error("Audio processing node unavailable");
+            }
 
-            processor.onaudioprocess = (event) => {
-                const input = event.inputBuffer.getChannelData(0);
-                const resampled = downsampleFloat32(input, audioContext.sampleRate);
-                if (resampled) {
-                    workletNode.port.postMessage({ type: "PCM", payload: resampled.buffer }, [resampled.buffer]);
-                }
-            };
+            await audioContext.resume();
 
-            source.connect(processor);
-            processor.connect(audioContext.destination);
-
-            processorRef.current = processor;
+            source.connect(workletNode);
+            workletNode.connect(audioContext.destination);
             recordedChunksRef.current = [];
             setIsRecording(true);
         } catch (err) {
@@ -312,8 +326,6 @@ const VoiceChatPage = ({
         if (!isRecording) {
             return;
         }
-
-        workletNodeRef.current?.port.postMessage({ type: "STOP" });
 
         const chunks = recordedChunksRef.current.slice();
         recordedChunksRef.current = [];
@@ -330,7 +342,8 @@ const VoiceChatPage = ({
         try {
             setError(null);
             const base64Audio = pcmToWavBase64(pcm);
-            await sendASRRequest(base64Audio);
+            const approxDurationMs = Math.round((pcm.length / TARGET_SAMPLE_RATE) * 1000);
+            await sendASRRequest(base64Audio, approxDurationMs);
         } catch (err) {
             setError(err.message || "ASR 请求失败");
         }

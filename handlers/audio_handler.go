@@ -3,8 +3,10 @@ package handlers
 import (
 	"context"
 	"encoding/base64"
+	json "encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -61,11 +63,9 @@ func (h *AudioHandler) HandleASR(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := h.contextWithTimeout(c.Request.Context(), req.TimeoutMS)
-	defer cancel()
-
 	input := services.ASRInput{Format: strings.TrimSpace(req.AudioFormat)}
 
+	fallbackTimeout := 3 * time.Minute
 	if trimmedURL := strings.TrimSpace(req.AudioURL); trimmedURL != "" {
 		input.URL = trimmedURL
 	} else {
@@ -87,7 +87,13 @@ func (h *AudioHandler) HandleASR(c *gin.Context) {
 		}
 
 		input.Data = merged
+		if estimated := estimateAudioDurationMs(merged, input.Format); estimated > 0 {
+			fallbackTimeout = computeASRTimeout(estimated)
+		}
 	}
+
+	ctx, cancel := h.contextWithTimeout(c.Request.Context(), req.TimeoutMS, fallbackTimeout)
+	defer cancel()
 
 	result, err := h.asr.Recognize(ctx, token, input)
 	if err != nil {
@@ -96,11 +102,25 @@ func (h *AudioHandler) HandleASR(c *gin.Context) {
 		return
 	}
 
+	if result == nil {
+		h.logger.Warn("asr recognize returned no result without error")
+		c.JSON(http.StatusBadGateway, gin.H{"error": "asr processing failed", "detail": "empty response"})
+		return
+	}
+
+	if len(result.Raw) > 0 {
+		var envelope interface{}
+		if err := json.Unmarshal(result.Raw, &envelope); err == nil {
+			c.JSON(http.StatusOK, envelope)
+			return
+		}
+		// fallback to legacy payload if raw cannot be parsed
+	}
+
 	response := gin.H{
 		"reqid":       result.ReqID,
 		"text":        result.Text,
 		"duration_ms": result.DurationMS,
-		"raw":         result.Raw,
 	}
 
 	c.JSON(http.StatusOK, response)
@@ -125,7 +145,7 @@ func (h *AudioHandler) HandleTTS(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := h.contextWithTimeout(c.Request.Context(), req.TimeoutMS)
+	ctx, cancel := h.contextWithTimeout(c.Request.Context(), req.TimeoutMS, 90*time.Second)
 	defer cancel()
 
 	result, err := h.tts.Synthesize(ctx, token, services.TTSRequest{
@@ -166,7 +186,7 @@ func (h *AudioHandler) HandleVoiceList(c *gin.Context) {
 		}
 	}
 
-	ctx, cancel := h.contextWithTimeout(c.Request.Context(), timeoutMS)
+	ctx, cancel := h.contextWithTimeout(c.Request.Context(), timeoutMS, 30*time.Second)
 	defer cancel()
 
 	voices, err := h.tts.ListVoices(ctx, token)
@@ -203,11 +223,14 @@ func (h *AudioHandler) resolveTokenFromQuery(c *gin.Context) string {
 	return strings.TrimSpace(h.cfg.QiniuAPIKey)
 }
 
-func (h *AudioHandler) contextWithTimeout(parent context.Context, timeoutMS int) (context.Context, context.CancelFunc) {
+func (h *AudioHandler) contextWithTimeout(parent context.Context, timeoutMS int, fallback time.Duration) (context.Context, context.CancelFunc) {
 	if timeoutMS > 0 {
 		return context.WithTimeout(parent, time.Duration(timeoutMS)*time.Millisecond)
 	}
-	return context.WithTimeout(parent, 30*time.Second)
+	if fallback <= 0 {
+		fallback = 30 * time.Second
+	}
+	return context.WithTimeout(parent, fallback)
 }
 
 func statusFromError(err error) int {
@@ -300,4 +323,53 @@ func mergeBuffers(chunks [][]byte) []byte {
 	}
 
 	return merged
+}
+
+func estimateAudioDurationMs(data []byte, format string) int {
+	if len(data) == 0 {
+		return 0
+	}
+
+	format = strings.ToLower(strings.TrimSpace(format))
+	compute := func(pcmBytes int) int {
+		if pcmBytes <= 0 {
+			return 0
+		}
+		samples := pcmBytes / 2
+		if samples <= 0 {
+			return 0
+		}
+		seconds := float64(samples) / 16000.0
+		if seconds <= 0 {
+			return 0
+		}
+		return int(math.Round(seconds * 1000))
+	}
+
+	switch {
+	case format == "" || format == "wav" || format == "wave" || strings.HasSuffix(format, "/wav") || strings.HasSuffix(format, "/wave"):
+		if len(data) <= 44 {
+			return 0
+		}
+		return compute(len(data) - 44)
+	case strings.Contains(format, "pcm"):
+		return compute(len(data))
+	default:
+		return 0
+	}
+}
+
+func computeASRTimeout(durationMs int) time.Duration {
+	estimated := time.Duration(durationMs) * time.Millisecond
+	if estimated <= 0 {
+		return 3 * time.Minute
+	}
+	timeout := estimated*2 + 30*time.Second
+	if timeout < 90*time.Second {
+		timeout = 90 * time.Second
+	}
+	if timeout > 5*time.Minute {
+		timeout = 5 * time.Minute
+	}
+	return timeout
 }
