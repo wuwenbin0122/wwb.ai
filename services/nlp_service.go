@@ -455,12 +455,12 @@ type skillDirective struct {
 
 var skillHooks = map[string]skillDirective{
 	"socratic_questions": {
-		systemPrompts: []string{"优先以 2-3 个开放式问题引导用户思考，再给出总结。"},
+		systemPrompts: []string{"每次回复至少提出 2 个循序渐进的问题，引导对方澄清定义/例外/依据。"},
 	},
 	"citation_mode": {
-		systemPrompts: []string{"引用或引用事实时请在段落末尾简要标注出处来源。"},
+		systemPrompts: []string{"若引用，请给出简短来源（作者/著作名/篇章）。无法确定时不要杜撰，提示“可能来源”并告知不确定性。"},
 		userRewrite: func(input string) string {
-			note := "[用户期望答案附带出处说明]"
+			note := "[请注明出处（作者/著作名/篇章）；不确定时提示可能来源并说明不确定性]"
 			if strings.Contains(input, note) {
 				return input
 			}
@@ -471,7 +471,7 @@ var skillHooks = map[string]skillDirective{
 		},
 	},
 	"emo_stabilizer": {
-		systemPrompts: []string{"保持情绪稳定且具备同理心，必要时先回应用户情绪再给出建议。"},
+		systemPrompts: []string{"检测到焦虑/沮丧情绪时，先进行共情反映，再给出可执行小步骤。"},
 	},
 }
 
