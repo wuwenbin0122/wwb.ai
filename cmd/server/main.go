@@ -87,6 +87,10 @@ func main() {
 	roleHandler := handlers.NewRoleHandler(pgPool)
 	router.GET("/api/roles", roleHandler.GetRoles)
 
+	chatService := services.NewChatService(cfg, sugar)
+	chatHandler := handlers.NewChatHandler(cfg, pgPool, chatService, sugar)
+	router.POST("/api/chat/completions", chatHandler.HandleChatCompletion)
+
 	asrService := services.NewASRService(cfg, sugar)
 	ttsService := services.NewTTSService(cfg, sugar)
 	audioHandler := handlers.NewAudioHandler(cfg, asrService, ttsService, sugar)

@@ -40,6 +40,7 @@ QINIU_API_BASE_URL=https://openai.qiniu.com/v1   # 可切换为 https://api.qnai
 QINIU_TTS_VOICE_TYPE=qiniu_zh_female_tmjxxy      # 默认音色
 QINIU_TTS_FORMAT=mp3                             # 默认音频编码，可选 ogg等
 QINIU_ASR_MODEL=asr                              # 当前官方模型名
+QINIU_NLP_MODEL=doubao-1.5-vision-pro            # 文本生成模型
 
 # 服务监听地址
 SERVER_ADDR=:8080
@@ -70,6 +71,7 @@ go run cmd/server/main.go
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET`  | `/api/roles`          | 角色目录查询（支持 `domain`、`tags`） |
+| `POST` | `/api/chat/completions` | 组合系统提示并转发至七牛大模型，返回助手回复 |
 | `POST` | `/api/audio/asr`      | 提交音频（Base64 或 URL）并获取转写文本 |
 | `POST` | `/api/audio/tts`      | 文本合成语音，返回 Base64 音频串 |
 | `GET`  | `/api/audio/voices`   | 拉取七牛官方音色列表 |
@@ -144,4 +146,3 @@ curl -X POST http://localhost:8080/api/audio/tts \
 - 多模态能力：结合七牛图片 / 视频 API 打造更丰富的互动形式。
 
 欢迎提交 Issue 或 Pull Request 与我们共同完善体验。
-

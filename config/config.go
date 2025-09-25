@@ -21,6 +21,7 @@ type Config struct {
 	QiniuTTSVoiceType string
 	QiniuTTSFormat    string
 	QiniuASRModel     string
+	QiniuNLPModel     string
 }
 
 var (
@@ -54,6 +55,7 @@ func Load() (*Config, error) {
 			QiniuTTSVoiceType: strings.TrimSpace(os.Getenv("QINIU_TTS_VOICE_TYPE")),
 			QiniuTTSFormat:    getEnv("QINIU_TTS_FORMAT", "mp3"),
 			QiniuASRModel:     getEnv("QINIU_ASR_MODEL", "asr"),
+			QiniuNLPModel:     getEnv("QINIU_NLP_MODEL", "doubao-1.5-vision-pro"),
 		}
 
 		loadErr = cfg.validate()
