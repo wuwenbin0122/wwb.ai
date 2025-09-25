@@ -111,6 +111,7 @@ func (h *NLPHandler) HandleChat(c *gin.Context) {
 
 	response := gin.H{
 		"message":           result.Reply,
+		"reply":             result.Reply,
 		"usage":             result.Usage,
 		"raw":               result.Raw,
 		"prompt_messages":   result.PromptMessages,

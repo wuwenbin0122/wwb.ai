@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 const TARGET_SAMPLE_RATE = 16000;
 const WORKLET_URL = `/worklets/pcm-processor.js`;
+const CHAT_HISTORY_LIMIT = 8;
 
 const downsampleFloat32 = (input, inputSampleRate) => {
     if (!input || input.length === 0) {
@@ -142,6 +143,49 @@ const formatDuration = (ms) => {
     return `${seconds.toFixed(1)}s`;
 };
 
+const normalizeSkillList = (skills) => {
+    if (!skills) {
+        return [];
+    }
+    if (Array.isArray(skills)) {
+        return skills
+            .map((skill) => ({
+                id: skill?.id ? String(skill.id).trim() : "",
+                name: skill?.name ? String(skill.name).trim() : "",
+            }))
+            .filter((skill) => skill.id);
+    }
+    if (typeof skills === "string") {
+        try {
+            return normalizeSkillList(JSON.parse(skills));
+        } catch (err) {
+            return [];
+        }
+    }
+    if (typeof skills === "object") {
+        return normalizeSkillList(Object.values(skills));
+    }
+    return [];
+};
+
+const normalizeLanguageList = (languages) => {
+    if (!languages) {
+        return [];
+    }
+    if (Array.isArray(languages)) {
+        return languages
+            .map((lang) => (typeof lang === "string" ? lang.trim() : ""))
+            .filter((lang) => lang !== "");
+    }
+    if (typeof languages === "string") {
+        return languages
+            .split(",")
+            .map((lang) => lang.trim())
+            .filter((lang) => lang !== "");
+    }
+    return [];
+};
+
 const VoiceChatPage = ({
     roles,
     selectedRoleId,
@@ -156,15 +200,21 @@ const VoiceChatPage = ({
     const workletNodeRef = useRef(null);
     const mediaStreamRef = useRef(null);
     const recordedChunksRef = useRef([]);
+    const audioUrlsRef = useRef(new Set());
+    const chatPendingRef = useRef(false);
 
     const [pendingStart, setPendingStart] = useState(false);
     const [isRecording, setIsRecording] = useState(false);
     const [error, setError] = useState(null);
-    const [transcripts, setTranscripts] = useState([]);
-    const [ttsText, setTtsText] = useState("");
+    const [, setTranscripts] = useState([]);
+    const [chatInput, setChatInput] = useState("");
+    const [chatPending, setChatPending] = useState(false);
+    const [chatError, setChatError] = useState(null);
     const [ttsPending, setTtsPending] = useState(false);
     const [ttsError, setTtsError] = useState(null);
     const [chatMessages, setChatMessages] = useState([]);
+    const [enabledSkillIds, setEnabledSkillIds] = useState([]);
+    const [selectedLanguage, setSelectedLanguage] = useState("zh");
 
     const [audioUrl, setAudioUrl] = useState("");
     const audioPlayerRef = useRef(null);
@@ -179,6 +229,43 @@ const VoiceChatPage = ({
     }, [voices, selectedVoice]);
 
     const selectedRole = useMemo(() => roles.find((role) => role.id === selectedRoleId) || null, [roles, selectedRoleId]);
+
+    const roleLanguages = useMemo(() => normalizeLanguageList(selectedRole?.languages), [selectedRole]);
+    const roleSkills = useMemo(() => normalizeSkillList(selectedRole?.skills), [selectedRole]);
+
+    useEffect(() => {
+        if (!selectedRole) {
+            setSelectedLanguage("zh");
+            setEnabledSkillIds([]);
+            return;
+        }
+
+        if (roleLanguages.length > 0) {
+            setSelectedLanguage(roleLanguages[0]);
+        } else {
+            setSelectedLanguage("zh");
+        }
+
+        if (roleSkills.length > 0) {
+            setEnabledSkillIds(roleSkills.map((skill) => skill.id));
+        } else {
+            setEnabledSkillIds([]);
+        }
+    }, [selectedRole, roleLanguages, roleSkills]);
+
+    const toggleSkill = useCallback((skillId) => {
+        setEnabledSkillIds((prev) => {
+            if (prev.includes(skillId)) {
+                return prev.filter((id) => id !== skillId);
+            }
+            return [...prev, skillId];
+        });
+    }, []);
+
+    const createMessageId = useCallback(
+        (prefix) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`,
+        []
+    );
 
     const cleanupRecording = useCallback(() => {
         if (workletNodeRef.current) {
@@ -243,51 +330,200 @@ const VoiceChatPage = ({
         return audioContext;
     }, []);
 
-    const sendASRRequest = useCallback(async (base64Audio, expectedDurationMs = 0) => {
-        const computedTimeout = (() => {
-            if (!expectedDurationMs || expectedDurationMs <= 0) {
-                return 0;
+    useEffect(
+        () => () => {
+            audioUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+            audioUrlsRef.current.clear();
+        },
+        []
+    );
+
+    const synthesizeAndPlay = useCallback(
+        async (text) => {
+            const trimmed = text.trim();
+            if (trimmed === "") {
+                return null;
             }
-            const expanded = Math.round(expectedDurationMs * 4);
-            return Math.max(120000, Math.min(300000, expanded));
-        })();
 
-        const payload = {
-            audio_data: base64Audio,
-            audio_format: "wav",
-        };
+            const response = await fetch(`${API_BASE}/api/audio/tts`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    text: trimmed,
+                    voice_type: selectedVoice || undefined,
+                    encoding: "mp3",
+                    speed_ratio: speechSpeed,
+                }),
+            });
 
-        if (computedTimeout > 0) {
-            payload.timeout_ms = computedTimeout;
-        }
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.detail || data.error || "TTS 请求失败");
+            }
 
-        const response = await fetch(`${API_BASE}/api/audio/asr`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        });
+            const audioBase64 = data.audio || "";
+            if (!audioBase64) {
+                throw new Error("未返回音频内容");
+            }
 
-        const data = await response.json();
-        if (!response.ok) {
-            throw new Error(data.detail || data.error || "ASR 请求失败");
-        }
+            const merged = mergeUint8Chunks([base64ToUint8Array(audioBase64)]);
+            const blob = new Blob([merged], { type: "audio/mpeg" });
+            const url = URL.createObjectURL(blob);
+            audioUrlsRef.current.add(url);
+            setAudioUrl(url);
 
-        const transcriptText = data.text || "";
-        const duration = data.duration_ms;
+            requestAnimationFrame(() => {
+                if (audioPlayerRef.current) {
+                    audioPlayerRef.current.load();
+                    audioPlayerRef.current.play().catch(() => {});
+                }
+            });
 
-        if (transcriptText) {
-            setTranscripts((prev) => [...prev, { text: transcriptText, reqid: data.reqid, duration }]);
-            setChatMessages((prev) => [
-                ...prev,
-                {
-                    id: `user-${Date.now()}`,
-                    role: "user",
-                    content: transcriptText,
-                    metadata: { duration: formatDuration(duration) },
-                },
-            ]);
-        }
-    }, []);
+            return { url, duration: data.duration, reqid: data.reqid };
+        },
+        [selectedVoice, speechSpeed]
+    );
+
+    const sendChatMessage = useCallback(
+        async (text, options = {}) => {
+            const trimmed = text.trim();
+            if (trimmed === "") {
+                return false;
+            }
+
+            if (!selectedRole || !selectedRoleId) {
+                setChatError("请先选择角色");
+                return false;
+            }
+
+            if (chatPendingRef.current) {
+                setChatError("上一轮对话仍在处理中，请稍候…");
+                return false;
+            }
+
+            setChatError(null);
+            setTtsError(null);
+            chatPendingRef.current = true;
+            setChatPending(true);
+
+            const userMessage = {
+                id: createMessageId("user"),
+                role: "user",
+                content: trimmed,
+                metadata: options.userMetadata,
+            };
+            setChatMessages((prev) => [...prev, userMessage]);
+
+            const historyWithCurrent = [...chatMessages, userMessage];
+            const trimmedHistory = historyWithCurrent.slice(-CHAT_HISTORY_LIMIT).map((msg) => ({
+                role: msg.role === "assistant" ? "assistant" : "user",
+                content: msg.content,
+            }));
+            const previousHistory = trimmedHistory.slice(0, -1);
+
+            try {
+                const payload = {
+                    role_id: selectedRoleId,
+                    roleId: selectedRoleId,
+                    language: selectedLanguage,
+                    lang: selectedLanguage,
+                    enabled_skill_ids: enabledSkillIds,
+                    skills: enabledSkillIds,
+                    messages: trimmedHistory,
+                    history: previousHistory,
+                    text: trimmed,
+                };
+
+                const response = await fetch(`${API_BASE}/api/nlp/chat`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                });
+
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.detail || data.error || "NLP 请求失败");
+                }
+
+                const replyPayload = data.message || data.reply || {};
+                const assistantText = typeof replyPayload.content === "string" ? replyPayload.content.trim() : "";
+                const assistantId = createMessageId("assistant");
+                const assistantMessage = {
+                    id: assistantId,
+                    role: "assistant",
+                    content: assistantText || "（未返回内容）",
+                };
+                setChatMessages((prev) => [...prev, assistantMessage]);
+
+                if (assistantText) {
+                    setTtsPending(true);
+                    try {
+                        const audioMeta = await synthesizeAndPlay(assistantText);
+                        if (audioMeta) {
+                            setChatMessages((prev) =>
+                                prev.map((msg) => (msg.id === assistantId ? { ...msg, audio: audioMeta } : msg))
+                            );
+                        }
+                    } catch (ttsErr) {
+                        setTtsError(ttsErr.message || "TTS 请求失败");
+                    } finally {
+                        setTtsPending(false);
+                    }
+                }
+
+                return true;
+            } catch (err) {
+                setChatError(err.message || "发送失败");
+                return false;
+            } finally {
+                chatPendingRef.current = false;
+                setChatPending(false);
+            }
+        },
+        [chatMessages, createMessageId, enabledSkillIds, selectedLanguage, selectedRole, selectedRoleId, synthesizeAndPlay]
+    );
+
+    const sendASRRequest = useCallback(
+        async (base64Audio, expectedDurationMs = 0) => {
+            const computedTimeout = (() => {
+                if (!expectedDurationMs || expectedDurationMs <= 0) {
+                    return 0;
+                }
+                const expanded = Math.round(expectedDurationMs * 4);
+                return Math.max(120000, Math.min(300000, expanded));
+            })();
+
+            const payload = {
+                audio_data: base64Audio,
+                audio_format: "wav",
+            };
+
+            if (computedTimeout > 0) {
+                payload.timeout_ms = computedTimeout;
+            }
+
+            const response = await fetch(`${API_BASE}/api/audio/asr`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.detail || data.error || "ASR 请求失败");
+            }
+
+            const transcriptText = data.text || "";
+            const duration = data.duration_ms;
+
+            if (transcriptText) {
+                setTranscripts((prev) => [...prev, { text: transcriptText, reqid: data.reqid, duration }]);
+                const metadata = duration ? { duration: formatDuration(duration) } : undefined;
+                await sendChatMessage(transcriptText, { userMetadata: metadata });
+            }
+        },
+        [sendChatMessage]
+    );
 
     const startRecording = useCallback(async () => {
         if (pendingStart || isRecording) {
@@ -349,76 +585,17 @@ const VoiceChatPage = ({
         }
     }, [cleanupRecording, isRecording, sendASRRequest]);
 
-    const handleSendTTS = useCallback(async () => {
-        const trimmed = ttsText.trim();
-        if (trimmed === "") {
-            setTtsError("请输入要合成的文本");
+    const handleSendChat = useCallback(async () => {
+        const text = chatInput.trim();
+        if (text === "") {
             return;
         }
 
-        setTtsError(null);
-        setTtsPending(true);
-
-        try {
-            const response = await fetch(`${API_BASE}/api/audio/tts`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    text: trimmed,
-                    voice_type: selectedVoice,
-                    encoding: "mp3",
-                    speed_ratio: speechSpeed,
-                }),
-            });
-
-            const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.detail || data.error || "TTS 请求失败");
-            }
-
-            const audioBase64 = data.audio || "";
-            if (!audioBase64) {
-                throw new Error("未返回音频内容");
-            }
-
-            const buffers = [base64ToUint8Array(audioBase64)];
-            const merged = mergeUint8Chunks(buffers);
-            const blob = new Blob([merged], { type: "audio/mpeg" });
-
-            if (audioUrl) {
-                URL.revokeObjectURL(audioUrl);
-            }
-            const url = URL.createObjectURL(blob);
-            setAudioUrl(url);
-
-            requestAnimationFrame(() => {
-                if (audioPlayerRef.current) {
-                    audioPlayerRef.current.load();
-                    audioPlayerRef.current.play().catch(() => {});
-                }
-            });
-
-            setChatMessages((prev) => [
-                ...prev,
-                {
-                    id: `assistant-${Date.now()}`,
-                    role: "assistant",
-                    content: trimmed,
-                    audio: { url, duration: data.duration, reqid: data.reqid },
-                },
-            ]);
-        } catch (err) {
-            setTtsError(err.message || "TTS 请求失败");
-        } finally {
-            setTtsPending(false);
+        const success = await sendChatMessage(text);
+        if (success) {
+            setChatInput("");
         }
-    }, [audioUrl, selectedVoice, speechSpeed, ttsText]);
-
-    useEffect(() => () => {
-        if (audioUrl) {
-            URL.revokeObjectURL(audioUrl);
-        }
-    }, [audioUrl]);
+    }, [chatInput, sendChatMessage]);
 
     const groupedVoices = useMemo(() => {
         if (!voices || voices.length === 0) {
@@ -508,18 +685,25 @@ const VoiceChatPage = ({
                     <div className="text-controls">
                         <textarea
                             rows={2}
-                            value={ttsText}
-                            onChange={(event) => setTtsText(event.target.value)}
-                            placeholder="输入文本进行语音合成，或使用上方录音按钮。"
+                            value={chatInput}
+                            onChange={(event) => setChatInput(event.target.value)}
+                            placeholder={selectedRole ? "输入文本与角色对话，或使用上方录音按钮。" : "请先选择角色后再开始对话。"}
+                            disabled={chatPending || ttsPending || !selectedRole}
                         />
-                        <button type="button" className="primary" onClick={handleSendTTS} disabled={ttsPending}>
-                            {ttsPending ? "合成中…" : "发送"}
+                        <button
+                            type="button"
+                            className="primary"
+                            onClick={handleSendChat}
+                            disabled={chatPending || ttsPending || !selectedRole}
+                        >
+                            {chatPending || ttsPending ? "处理中…" : "发送"}
                         </button>
                     </div>
 
-                    {(error || ttsError) && (
+                    {(error || chatError || ttsError) && (
                         <div className="error-block">
                             {error && <p>ASR：{error}</p>}
+                            {chatError && <p>Chat：{chatError}</p>}
                             {ttsError && <p>TTS：{ttsError}</p>}
                         </div>
                     )}
@@ -534,6 +718,45 @@ const VoiceChatPage = ({
             </div>
 
             <aside className="chat-settings">
+                <div className="settings-section">
+                    <h3>语言</h3>
+                    {roleLanguages.length > 0 ? (
+                        <select value={selectedLanguage} onChange={(event) => setSelectedLanguage(event.target.value)}>
+                            {roleLanguages.map((lang) => (
+                                <option key={lang} value={lang}>
+                                    {lang}
+                                </option>
+                            ))}
+                        </select>
+                    ) : (
+                        <p className="muted">该角色未提供语言信息，默认使用中文。</p>
+                    )}
+                </div>
+
+                <div className="settings-section">
+                    <h3>技能开关</h3>
+                    {roleSkills.length === 0 && <p className="muted">该角色未定义技能。</p>}
+                    {roleSkills.length > 0 && (
+                        <ul className="skill-list">
+                            {roleSkills.map((skill) => (
+                                <li key={skill.id}>
+                                    <label>
+                                        <input
+                                            type="checkbox"
+                                            checked={enabledSkillIds.includes(skill.id)}
+                                            onChange={() => toggleSkill(skill.id)}
+                                        />
+                                        <span>
+                                            {skill.name || skill.id}
+                                            <small className="muted">（{skill.id}）</small>
+                                        </span>
+                                    </label>
+                                </li>
+                            ))}
+                        </ul>
+                    )}
+                </div>
+
                 <div className="settings-section">
                     <h3>音色与语速</h3>
                     <p className="muted">从音色列表中选择喜爱的声音，并调整语速。</p>
