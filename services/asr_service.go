@@ -38,6 +38,24 @@ type ASRResult struct {
 	Raw        json.RawMessage `json:"raw"`
 }
 
+// ASRStreamConfig controls the setup of a streaming ASR session.
+type ASRStreamConfig struct {
+	SampleRate int
+	Channels   int
+	Bits       int
+	Model      string
+}
+
+// ASRStreamEvent describes a message received from the upstream ASR websocket.
+type ASRStreamEvent struct {
+	ReqID      string
+	Text       string
+	DurationMS int
+	IsFinal    bool
+	Raw        json.RawMessage
+	Err        error
+}
+
 type asrService struct {
 	baseURL string
 	model   string
@@ -49,6 +67,13 @@ type asrService struct {
 // ASRService exposes a REST-based transcription workflow.
 type ASRService struct {
 	inner *asrService
+}
+
+// ASRStreamSession manages a bidirectional websocket session with Qiniu's ASR service.
+type ASRStreamSession struct {
+	conn   *websocket.Conn
+	writer *qiniuASRWebsocketWriter
+	logger *zap.SugaredLogger
 }
 
 // NewASRService constructs an ASR service configured for Qiniu's REST API.
@@ -79,6 +104,11 @@ func NewASRService(cfg *config.Config, logger *zap.SugaredLogger) *ASRService {
 // Recognize submits the provided audio and returns the transcription text.
 func (s *ASRService) Recognize(ctx context.Context, token string, input ASRInput) (*ASRResult, error) {
 	return s.inner.recognize(ctx, token, input)
+}
+
+// OpenStream establishes a websocket session for streaming audio to Qiniu.
+func (s *ASRService) OpenStream(ctx context.Context, token string, cfg ASRStreamConfig) (*ASRStreamSession, error) {
+	return s.inner.openStream(ctx, token, cfg)
 }
 
 func (s *asrService) recognize(ctx context.Context, token string, input ASRInput) (*ASRResult, error) {
@@ -119,6 +149,201 @@ func (s *asrService) recognize(ctx context.Context, token string, input ASRInput
 	}
 
 	return nil, fmt.Errorf("asr websocket failed: %v; rest fallback failed: %w", err, restErr)
+}
+
+func (s *asrService) openStream(ctx context.Context, token string, cfg ASRStreamConfig) (*ASRStreamSession, error) {
+	if strings.TrimSpace(token) == "" {
+		return nil, fmt.Errorf("authorization token is required")
+	}
+
+	if s.wsURL == "" {
+		return nil, errors.New("asr websocket endpoint is not configured")
+	}
+
+	sampleRate := cfg.SampleRate
+	if sampleRate <= 0 {
+		sampleRate = 16000
+	}
+	channels := cfg.Channels
+	if channels <= 0 {
+		channels = 1
+	}
+	bits := cfg.Bits
+	if bits <= 0 {
+		bits = 16
+	}
+
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+
+	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	conn, resp, err := dialer.DialContext(ctx, s.wsURL+"/voice/asr", headers)
+	if err != nil {
+		if resp != nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			snippet := strings.TrimSpace(string(body))
+			if snippet == "" {
+				snippet = resp.Status
+			}
+			return nil, fmt.Errorf("dial asr websocket: status %d: %s", resp.StatusCode, snippet)
+		}
+		return nil, fmt.Errorf("dial asr websocket: %w", err)
+	}
+
+	model := strings.TrimSpace(cfg.Model)
+	if model == "" {
+		model = s.model
+	}
+
+	writer := newQiniuASRWebsocketWriter(conn, s.logger, sampleRate, channels, bits)
+	if err := writer.SendConfig(model); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("send asr config: %w", err)
+	}
+
+	return &ASRStreamSession{conn: conn, writer: writer, logger: s.logger}, nil
+}
+
+// SendAudio forwards a PCM chunk to the upstream websocket session.
+func (s *ASRStreamSession) SendAudio(chunk []byte) error {
+	if s == nil || s.writer == nil {
+		return errors.New("asr stream session is not initialized")
+	}
+	if len(chunk) == 0 {
+		return nil
+	}
+	return s.writer.SendAudioChunk(chunk)
+}
+
+// SendStop signals the end of audio streaming to the upstream session.
+func (s *ASRStreamSession) SendStop() error {
+	if s == nil || s.writer == nil {
+		return errors.New("asr stream session is not initialized")
+	}
+	return s.writer.SendStop()
+}
+
+// Close terminates the websocket session.
+func (s *ASRStreamSession) Close() error {
+	if s == nil || s.conn == nil {
+		return nil
+	}
+	return s.conn.Close()
+}
+
+// NextEvent waits for the next message from the upstream ASR websocket.
+func (s *ASRStreamSession) NextEvent(ctx context.Context) (*ASRStreamEvent, error) {
+	if s == nil || s.conn == nil {
+		return nil, errors.New("asr stream session is not initialized")
+	}
+
+	if ctx != nil {
+		if deadline, ok := ctx.Deadline(); ok {
+			_ = s.conn.SetReadDeadline(deadline)
+		} else {
+			_ = s.conn.SetReadDeadline(time.Time{})
+		}
+	} else {
+		_ = s.conn.SetReadDeadline(time.Time{})
+	}
+
+	messageType, payload, err := s.conn.ReadMessage()
+	if err != nil {
+		return nil, err
+	}
+
+	var envelope map[string]interface{}
+	var processed []byte
+
+	switch messageType {
+	case websocket.BinaryMessage:
+		env, buf, parseErr := parseASRWSBinaryMessage(payload)
+		if parseErr != nil {
+			if s.logger != nil {
+				s.logger.Debugf("parse asr binary message failed: %v", parseErr)
+			}
+			return &ASRStreamEvent{}, nil
+		}
+		envelope = env
+		processed = buf
+	case websocket.TextMessage:
+		env := make(map[string]interface{})
+		if err := json.Unmarshal(payload, &env); err != nil {
+			if s.logger != nil {
+				s.logger.Debugf("unmarshal asr text payload failed: %v", err)
+			}
+			return &ASRStreamEvent{}, nil
+		}
+		envelope = env
+		processed = append([]byte(nil), payload...)
+	default:
+		if s.logger != nil {
+			s.logger.Debugf("ignore unsupported websocket frame type: %d", messageType)
+		}
+		return &ASRStreamEvent{}, nil
+	}
+
+	event := &ASRStreamEvent{}
+	if len(processed) > 0 {
+		event.Raw = json.RawMessage(append([]byte(nil), processed...))
+	}
+
+	if envelope == nil {
+		return event, nil
+	}
+
+	if errField, ok := envelope["error"].(map[string]interface{}); ok {
+		if message, ok := errField["message"].(string); ok && strings.TrimSpace(message) != "" {
+			event.Err = fmt.Errorf("qiniu asr error: %s", message)
+		}
+	}
+
+	if v, ok := envelope["reqid"].(string); ok && v != "" {
+		event.ReqID = v
+	}
+
+	if dataObj, ok := envelope["data"].(map[string]interface{}); ok {
+		if resultObj, ok := dataObj["result"].(map[string]interface{}); ok {
+			if text, ok := resultObj["text"].(string); ok && text != "" {
+				event.Text = text
+			}
+			if additions, ok := resultObj["additions"].(map[string]interface{}); ok {
+				if durStr, ok := additions["duration"].(string); ok {
+					if val, convErr := strconv.Atoi(strings.TrimSpace(durStr)); convErr == nil {
+						event.DurationMS = val
+					}
+				}
+			}
+		}
+		if audioInfo, ok := dataObj["audio_info"].(map[string]interface{}); ok && event.DurationMS == 0 {
+			if dur, ok := audioInfo["duration"].(float64); ok {
+				event.DurationMS = int(dur)
+			}
+		}
+	}
+
+	if text, ok := envelope["text"].(string); ok && text != "" {
+		event.Text = text
+	}
+
+	if v, ok := envelope["is_final"]; ok {
+		switch t := v.(type) {
+		case bool:
+			event.IsFinal = t
+		case string:
+			event.IsFinal = strings.EqualFold(t, "true")
+		}
+	}
+
+	if event.Text == "" {
+		trimmed := strings.TrimSpace(string(processed))
+		if trimmed != "" && trimmed != "{}" {
+			event.Text = trimmed
+		}
+	}
+
+	return event, nil
 }
 
 func (s *asrService) recognizeREST(ctx context.Context, token string, audio map[string]interface{}) (*ASRResult, error) {

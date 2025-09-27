@@ -4,6 +4,13 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 const TARGET_SAMPLE_RATE = 16000;
 const WORKLET_URL = `/worklets/pcm-processor.js`;
 
+const buildWebSocketURL = (path) => {
+    const base = API_BASE && API_BASE.trim() !== "" ? API_BASE : window.location.origin;
+    const url = new URL(path, base);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    return url.toString();
+};
+
 const downsampleFloat32 = (input, inputSampleRate) => {
     if (!input || input.length === 0) {
         return null;
@@ -38,73 +45,6 @@ const downsampleFloat32 = (input, inputSampleRate) => {
     }
 
     return result;
-};
-
-const mergeInt16Chunks = (chunks) => {
-    if (!chunks || chunks.length === 0) {
-        return null;
-    }
-
-    const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
-    const result = new Int16Array(totalLength);
-    let offset = 0;
-    chunks.forEach((chunk) => {
-        result.set(chunk, offset);
-        offset += chunk.length;
-    });
-    return result;
-};
-
-const uint8ToBase64 = (uint8) => {
-    let binary = "";
-    const chunkSize = 0x8000;
-    for (let i = 0; i < uint8.length; i += chunkSize) {
-        const sub = uint8.subarray(i, i + chunkSize);
-        binary += String.fromCharCode.apply(null, sub);
-    }
-    return btoa(binary);
-};
-
-const pcmToWavBase64 = (pcm, sampleRate = TARGET_SAMPLE_RATE) => {
-    const bytesPerSample = 2;
-    const blockAlign = bytesPerSample;
-    const buffer = new ArrayBuffer(44 + pcm.length * bytesPerSample);
-    const view = new DataView(buffer);
-
-    let offset = 0;
-    const writeString = (str) => {
-        for (let i = 0; i < str.length; i += 1) {
-            view.setUint8(offset + i, str.charCodeAt(i));
-        }
-        offset += str.length;
-    };
-
-    writeString("RIFF");
-    view.setUint32(offset, 36 + pcm.length * bytesPerSample, true);
-    offset += 4;
-    writeString("WAVE");
-    writeString("fmt ");
-    view.setUint32(offset, 16, true);
-    offset += 4;
-    view.setUint16(offset, 1, true);
-    offset += 2;
-    view.setUint16(offset, 1, true);
-    offset += 2;
-    view.setUint32(offset, sampleRate, true);
-    offset += 4;
-    view.setUint32(offset, sampleRate * blockAlign, true);
-    offset += 4;
-    view.setUint16(offset, blockAlign, true);
-    offset += 2;
-    view.setUint16(offset, bytesPerSample * 8, true);
-    offset += 2;
-    writeString("data");
-    view.setUint32(offset, pcm.length * bytesPerSample, true);
-    offset += 4;
-
-    new Int16Array(buffer, offset, pcm.length).set(pcm);
-
-    return uint8ToBase64(new Uint8Array(buffer));
 };
 
 const base64ToUint8Array = (base64) => {
@@ -156,11 +96,14 @@ const VoiceChatPage = ({
     const workletNodeRef = useRef(null);
     const mediaStreamRef = useRef(null);
     const recordedChunksRef = useRef([]);
+    const asrSocketRef = useRef(null);
+    const streamingActiveRef = useRef(false);
 
     const [pendingStart, setPendingStart] = useState(false);
     const [isRecording, setIsRecording] = useState(false);
     const [error, setError] = useState(null);
     const [transcripts, setTranscripts] = useState([]);
+    const [liveTranscript, setLiveTranscript] = useState("");
     const [ttsText, setTtsText] = useState("");
     const [ttsPending, setTtsPending] = useState(false);
     const [ttsError, setTtsError] = useState(null);
@@ -180,6 +123,28 @@ const VoiceChatPage = ({
 
     const selectedRole = useMemo(() => roles.find((role) => role.id === selectedRoleId) || null, [roles, selectedRoleId]);
 
+    const closeASRSocket = useCallback((code = 1000, reason = "") => {
+        streamingActiveRef.current = false;
+        setLiveTranscript("");
+        const socket = asrSocketRef.current;
+        if (!socket) {
+            asrSocketRef.current = null;
+            return;
+        }
+        asrSocketRef.current = null;
+        try {
+            socket.onopen = null;
+            socket.onmessage = null;
+            socket.onerror = null;
+            socket.onclose = null;
+            if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+                socket.close(code, reason);
+            }
+        } catch (err) {
+            // ignore close errors
+        }
+    }, [setLiveTranscript]);
+
     const cleanupRecording = useCallback(() => {
         if (workletNodeRef.current) {
             workletNodeRef.current.port.postMessage({ type: "STOP" });
@@ -197,7 +162,34 @@ const VoiceChatPage = ({
         workletLoadedRef.current = false;
     }, []);
 
-    useEffect(() => () => cleanupRecording(), [cleanupRecording]);
+    useEffect(
+        () => () => {
+            cleanupRecording();
+            closeASRSocket(1000, "teardown");
+        },
+        [cleanupRecording, closeASRSocket],
+    );
+
+    const sendPCMChunk = useCallback(
+        (chunk) => {
+            if (!chunk || chunk.length === 0) {
+                return;
+            }
+            const socket = asrSocketRef.current;
+            if (!socket || socket.readyState !== WebSocket.OPEN || !streamingActiveRef.current) {
+                return;
+            }
+            try {
+                const buffer = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+                socket.send(buffer);
+            } catch (err) {
+                const message = err instanceof Error ? err.message : "实时音频发送失败";
+                setError(message);
+                closeASRSocket(1011, "chunk-send-error");
+            }
+        },
+        [closeASRSocket, setError],
+    );
 
     const ensureAudioContext = useCallback(async () => {
         if (!audioContextRef.current) {
@@ -235,59 +227,127 @@ const VoiceChatPage = ({
                 const resampled = downsampleFloat32(floatBuffer, sourceRate);
                 if (resampled && resampled.length > 0) {
                     recordedChunksRef.current.push(resampled);
+                    sendPCMChunk(resampled);
                 }
             };
             workletNodeRef.current = workletNode;
         }
 
         return audioContext;
-    }, []);
+    }, [sendPCMChunk]);
 
-    const sendASRRequest = useCallback(async (base64Audio, expectedDurationMs = 0) => {
-        const computedTimeout = (() => {
-            if (!expectedDurationMs || expectedDurationMs <= 0) {
-                return 0;
+    const openASRSocket = useCallback(() => {
+        return new Promise((resolve, reject) => {
+            try {
+                const socket = new WebSocket(buildWebSocketURL("/api/audio/asr/stream"));
+                socket.binaryType = "arraybuffer";
+                asrSocketRef.current = socket;
+
+                let handshakeResolved = false;
+
+                const fail = (message) => {
+                    if (!handshakeResolved) {
+                        handshakeResolved = true;
+                        reject(new Error(message));
+                    } else {
+                        setError(message);
+                    }
+                    closeASRSocket(1011, message);
+                };
+
+                socket.onopen = () => {
+                    try {
+                        socket.send(
+                            JSON.stringify({
+                                type: "start",
+                                audio_format: "pcm",
+                                sample_rate: TARGET_SAMPLE_RATE,
+                                channels: 1,
+                                bits: 16,
+                            }),
+                        );
+                    } catch (err) {
+                        fail(err instanceof Error ? err.message : "初始化 ASR 流失败");
+                    }
+                };
+
+                socket.onmessage = (event) => {
+                    let payload;
+                    try {
+                        payload = JSON.parse(event.data);
+                    } catch (err) {
+                        return;
+                    }
+
+                    const messageType = typeof payload.type === "string" ? payload.type.toLowerCase() : "";
+
+                    if (!handshakeResolved) {
+                        if (messageType === "ready") {
+                            handshakeResolved = true;
+                            streamingActiveRef.current = true;
+                            setLiveTranscript("");
+                            resolve(socket);
+                            return;
+                        }
+                        if (messageType === "error") {
+                            fail(payload.error || "ASR 流初始化失败");
+                            return;
+                        }
+                    }
+
+                    if (messageType === "partial") {
+                        setLiveTranscript(payload.text || "");
+                        return;
+                    }
+
+                    if (messageType === "final") {
+                        streamingActiveRef.current = false;
+                        setLiveTranscript("");
+                        const transcriptText = payload.text || "";
+                        const duration = payload.duration_ms;
+                        const reqid = payload.reqid;
+                        if (transcriptText) {
+                            setTranscripts((prev) => [...prev, { text: transcriptText, reqid, duration }]);
+                            setChatMessages((prev) => [
+                                ...prev,
+                                {
+                                    id: `user-${Date.now()}`,
+                                    role: "user",
+                                    content: transcriptText,
+                                    metadata: duration ? { duration: formatDuration(duration) } : undefined,
+                                },
+                            ]);
+                        }
+                        cleanupRecording();
+                        setIsRecording(false);
+                        closeASRSocket(1000, "completed");
+                        return;
+                    }
+
+                    if (messageType === "error") {
+                        fail(payload.error || "ASR 流错误");
+                    }
+                };
+
+                socket.onerror = () => {
+                    fail("ASR WebSocket 连接错误");
+                };
+
+                socket.onclose = () => {
+                    if (!handshakeResolved) {
+                        fail("ASR WebSocket 连接已关闭");
+                        return;
+                    }
+                    if (asrSocketRef.current === socket) {
+                        asrSocketRef.current = null;
+                    }
+                    streamingActiveRef.current = false;
+                };
+            } catch (err) {
+                reject(err instanceof Error ? err : new Error(String(err)));
             }
-            const expanded = Math.round(expectedDurationMs * 4);
-            return Math.max(120000, Math.min(300000, expanded));
-        })();
-
-        const payload = {
-            audio_data: base64Audio,
-            audio_format: "wav",
-        };
-
-        if (computedTimeout > 0) {
-            payload.timeout_ms = computedTimeout;
-        }
-
-        const response = await fetch(`${API_BASE}/api/audio/asr`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
         });
-
-        const data = await response.json();
-        if (!response.ok) {
-            throw new Error(data.detail || data.error || "ASR 请求失败");
-        }
-
-        const transcriptText = data.text || "";
-        const duration = data.duration_ms;
-
-        if (transcriptText) {
-            setTranscripts((prev) => [...prev, { text: transcriptText, reqid: data.reqid, duration }]);
-            setChatMessages((prev) => [
-                ...prev,
-                {
-                    id: `user-${Date.now()}`,
-                    role: "user",
-                    content: transcriptText,
-                    metadata: { duration: formatDuration(duration) },
-                },
-            ]);
-        }
-    }, []);
+    }, [cleanupRecording, closeASRSocket, setChatMessages, setError, setIsRecording, setLiveTranscript, setTranscripts]);
 
     const startRecording = useCallback(async () => {
         if (pendingStart || isRecording) {
@@ -299,6 +359,7 @@ const VoiceChatPage = ({
 
         try {
             const audioContext = await ensureAudioContext();
+            await openASRSocket();
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             mediaStreamRef.current = stream;
 
@@ -315,39 +376,34 @@ const VoiceChatPage = ({
             recordedChunksRef.current = [];
             setIsRecording(true);
         } catch (err) {
-            setError(err.message || "无法启动录音");
+            setError(err instanceof Error ? err.message : "无法启动录音");
             cleanupRecording();
+            closeASRSocket(1011, "start-failed");
         } finally {
             setPendingStart(false);
         }
-    }, [cleanupRecording, ensureAudioContext, isRecording, pendingStart]);
+    }, [cleanupRecording, closeASRSocket, ensureAudioContext, isRecording, openASRSocket, pendingStart]);
 
     const stopRecording = useCallback(async () => {
         if (!isRecording) {
             return;
         }
 
-        const chunks = recordedChunksRef.current.slice();
+        streamingActiveRef.current = false;
+        const socket = asrSocketRef.current;
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            try {
+                socket.send(JSON.stringify({ type: "stop" }));
+            } catch (err) {
+                closeASRSocket(1011, "stop-error");
+            }
+        }
+
         recordedChunksRef.current = [];
 
         cleanupRecording();
         setIsRecording(false);
-
-        const pcm = mergeInt16Chunks(chunks);
-        if (!pcm || pcm.length === 0) {
-            setError("没有捕获到音频，请重试");
-            return;
-        }
-
-        try {
-            setError(null);
-            const base64Audio = pcmToWavBase64(pcm);
-            const approxDurationMs = Math.round((pcm.length / TARGET_SAMPLE_RATE) * 1000);
-            await sendASRRequest(base64Audio, approxDurationMs);
-        } catch (err) {
-            setError(err.message || "ASR 请求失败");
-        }
-    }, [cleanupRecording, isRecording, sendASRRequest]);
+    }, [cleanupRecording, closeASRSocket, isRecording]);
 
     const handleSendTTS = useCallback(async () => {
         const trimmed = ttsText.trim();
@@ -480,6 +536,14 @@ const VoiceChatPage = ({
 
                 <div className="chat-transcript" role="log">
                     {chatMessages.length === 0 && <p className="muted">记录你的语音或文本，将在这里呈现实时字幕与回复。</p>}
+                    {liveTranscript && (
+                        <div className="chat-bubble user live">
+                            <div className="bubble-content">
+                                <p>{liveTranscript}</p>
+                                <span className="bubble-meta">实时转写</span>
+                            </div>
+                        </div>
+                    )}
                     {chatMessages.map((message) => (
                         <div key={message.id} className={`chat-bubble ${message.role}`}>
                             <div className="bubble-content">
