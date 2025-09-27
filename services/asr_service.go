@@ -57,11 +57,12 @@ type ASRStreamEvent struct {
 }
 
 type asrService struct {
-	baseURL string
-	model   string
-	client  httpDoer
-	logger  *zap.SugaredLogger
-	wsURL   string
+	baseURL    string
+	model      string
+	client     httpDoer
+	logger     *zap.SugaredLogger
+	wsURL      string
+	sampleRate int
 }
 
 // ASRService exposes a REST-based transcription workflow.
@@ -90,13 +91,19 @@ func NewASRService(cfg *config.Config, logger *zap.SugaredLogger) *ASRService {
 
 	wsURL := deriveWebsocketURL(base)
 
+	sampleRate := cfg.ASRSampleRate
+	if sampleRate <= 0 {
+		sampleRate = 16000
+	}
+
 	return &ASRService{
 		inner: &asrService{
-			baseURL: base,
-			model:   model,
-			client:  newDefaultHTTPClient(),
-			logger:  logger,
-			wsURL:   wsURL,
+			baseURL:    base,
+			model:      model,
+			client:     newDefaultHTTPClient(),
+			logger:     logger,
+			wsURL:      wsURL,
+			sampleRate: sampleRate,
 		},
 	}
 }
@@ -162,7 +169,7 @@ func (s *asrService) openStream(ctx context.Context, token string, cfg ASRStream
 
 	sampleRate := cfg.SampleRate
 	if sampleRate <= 0 {
-		sampleRate = 16000
+		sampleRate = s.sampleRate
 	}
 	channels := cfg.Channels
 	if channels <= 0 {
@@ -406,7 +413,7 @@ func (s *asrService) recognizeWebsocket(ctx context.Context, token, format strin
 		return nil, errors.New("asr websocket endpoint is not configured")
 	}
 
-	pcm, sampleRate, channels, bits, err := extractPCMBuffer(format, data)
+	pcm, sampleRate, channels, bits, err := extractPCMBuffer(format, data, s.sampleRate)
 	if err != nil {
 		return nil, err
 	}
@@ -612,7 +619,11 @@ func (s *asrService) recognizeWebsocket(ctx context.Context, token, format strin
 
 	if durationMS == 0 {
 		samples := float64(len(pcm)) / 2.0
-		durationMS = int(math.Round(samples / 16000.0 * 1000.0))
+		sr := sampleRate
+		if sr <= 0 {
+			sr = s.sampleRate
+		}
+		durationMS = int(math.Round(samples / float64(sr) * 1000.0))
 	}
 
 	cleanText := strings.TrimSpace(finalText)
@@ -646,7 +657,7 @@ func (s *asrService) recognizeWebsocket(ctx context.Context, token, format strin
 	}, nil
 }
 
-func extractPCMBuffer(format string, data []byte) ([]byte, int, int, int, error) {
+func extractPCMBuffer(format string, data []byte, fallbackRate int) ([]byte, int, int, int, error) {
 	format = strings.ToLower(strings.TrimSpace(format))
 	switch {
 	case format == "" || format == "wav" || format == "wave" || strings.HasSuffix(format, "/wav") || strings.HasSuffix(format, "/wave"):
@@ -659,7 +670,7 @@ func extractPCMBuffer(format string, data []byte) ([]byte, int, int, int, error)
 		}
 		sampleRate := int(binary.LittleEndian.Uint32(data[24:28]))
 		if sampleRate <= 0 {
-			sampleRate = 16000
+			sampleRate = fallbackRate
 		}
 		bits := int(binary.LittleEndian.Uint16(data[34:36]))
 		if bits <= 0 {
@@ -667,7 +678,7 @@ func extractPCMBuffer(format string, data []byte) ([]byte, int, int, int, error)
 		}
 		return data[44:], sampleRate, channels, bits, nil
 	case format == "pcm" || strings.Contains(format, "pcm"):
-		return data, 16000, 1, 16, nil
+		return data, fallbackRate, 1, 16, nil
 	default:
 		return nil, 0, 0, 0, fmt.Errorf("unsupported inline audio format: %s", format)
 	}

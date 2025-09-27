@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 
 	"github.com/wuwenbin0122/wwb.ai/config"
 	"github.com/wuwenbin0122/wwb.ai/db"
+	"github.com/wuwenbin0122/wwb.ai/db/models"
 )
 
 type skill struct {
@@ -17,7 +17,7 @@ type skill struct {
 type seedRole struct {
 	name        string
 	domain      string
-	tags        string
+	tags        []string
 	bio         string
 	personality map[string]string
 	background  string
@@ -43,7 +43,7 @@ func main() {
 		{
 			name:   "Socrates",
 			domain: "Philosophy",
-			tags:   "Wise, Philosophical",
+			tags:   []string{"wise", "philosophy"},
 			bio:    "Ancient Greek philosopher",
 			personality: map[string]string{
 				"temperament":         "inquiring",
@@ -59,7 +59,7 @@ func main() {
 		{
 			name:   "Harry Potter",
 			domain: "Literature",
-			tags:   "Wizard, Brave",
+			tags:   []string{"wizard", "brave"},
 			bio:    "A young wizard with magical abilities",
 			personality: map[string]string{
 				"temperament":         "courageous",
@@ -75,7 +75,7 @@ func main() {
 		{
 			name:   "Mulan",
 			domain: "History",
-			tags:   "Heroic, Loyal",
+			tags:   []string{"heroic", "loyal"},
 			bio:    "Legendary woman warrior from ancient China",
 			personality: map[string]string{
 				"temperament":         "resolute",
@@ -91,7 +91,7 @@ func main() {
 		{
 			name:   "Sherlock Holmes",
 			domain: "Literature",
-			tags:   "Detective, Analytical",
+			tags:   []string{"detective", "analytical"},
 			bio:    "Brilliant detective known for keen observation",
 			personality: map[string]string{
 				"temperament":         "analytical",
@@ -122,12 +122,12 @@ func main() {
 	}
 
 	for _, r := range roles {
-		personalityJSON, err := json.Marshal(r.personality)
+		personalityJSON, err := models.MarshalPersonality(r.personality)
 		if err != nil {
 			log.Fatalf("marshal personality for %s: %v", r.name, err)
 		}
 
-		skillsJSON, err := json.Marshal(r.skills)
+		skillsJSON, err := models.MarshalSkills(convertSkills(r.skills))
 		if err != nil {
 			log.Fatalf("marshal skills for %s: %v", r.name, err)
 		}
@@ -153,4 +153,13 @@ func main() {
 	}
 
 	log.Printf("seeded %d roles", len(roles))
+}
+
+func convertSkills(skills []skill) []models.Skill {
+	converted := make([]models.Skill, 0, len(skills))
+	for _, s := range skills {
+		converted = append(converted, models.Skill{Name: s.Name, Description: s.Description})
+	}
+
+	return converted
 }

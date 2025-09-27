@@ -108,7 +108,7 @@ func (h *AudioHandler) HandleASR(c *gin.Context) {
 		}
 
 		input.Data = merged
-		if estimated := estimateAudioDurationMs(merged, input.Format); estimated > 0 {
+		if estimated := estimateAudioDurationMs(merged, input.Format, h.cfg.ASRSampleRate); estimated > 0 {
 			fallbackTimeout = computeASRTimeout(estimated)
 		}
 	}
@@ -554,7 +554,7 @@ func mergeBuffers(chunks [][]byte) []byte {
 	return merged
 }
 
-func estimateAudioDurationMs(data []byte, format string) int {
+func estimateAudioDurationMs(data []byte, format string, sampleRate int) int {
 	if len(data) == 0 {
 		return 0
 	}
@@ -568,7 +568,11 @@ func estimateAudioDurationMs(data []byte, format string) int {
 		if samples <= 0 {
 			return 0
 		}
-		seconds := float64(samples) / 16000.0
+		rate := sampleRate
+		if rate <= 0 {
+			rate = 16000
+		}
+		seconds := float64(samples) / float64(rate)
 		if seconds <= 0 {
 			return 0
 		}

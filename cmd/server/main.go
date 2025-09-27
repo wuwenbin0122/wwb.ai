@@ -40,6 +40,20 @@ func main() {
 	}
 	defer pgPool.Close()
 
+	gormDB, err := db.NewGORM(cfg.DBURL)
+	if err != nil {
+		sugar.Fatalf("open gorm: %v", err)
+	}
+	sqlDB, err := gormDB.DB()
+	if err != nil {
+		sugar.Fatalf("resolve gorm sql db: %v", err)
+	}
+	defer func() {
+		if err := sqlDB.Close(); err != nil {
+			sugar.Warnf("close gorm db: %v", err)
+		}
+	}()
+
 	mongoClient, err := db.NewMongoClient(baseCtx, cfg.MongoURI)
 	if err != nil {
 		sugar.Fatalf("connect mongo: %v", err)
@@ -77,6 +91,7 @@ func main() {
 		c.Set("postgres", pgPool)
 		c.Set("mongo", mongoClient)
 		c.Set("redis", redisClient)
+		c.Set("gorm", gormDB)
 		c.Next()
 	})
 
@@ -84,7 +99,7 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	roleHandler := handlers.NewRoleHandler(pgPool)
+	roleHandler := handlers.NewRoleHandler(gormDB)
 	router.GET("/api/roles", roleHandler.GetRoles)
 
 	asrService := services.NewASRService(cfg, sugar)

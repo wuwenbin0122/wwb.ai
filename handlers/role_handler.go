@@ -1,95 +1,117 @@
 package handlers
 
 import (
-	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/lib/pq"
 	"github.com/wuwenbin0122/wwb.ai/db/models"
+	"gorm.io/gorm"
 )
 
 // RoleHandler provides HTTP handlers for role resources.
 type RoleHandler struct {
-	pool *pgxpool.Pool
+	db *gorm.DB
 }
 
-func NewRoleHandler(pool *pgxpool.Pool) *RoleHandler {
-	return &RoleHandler{pool: pool}
+// NewRoleHandler constructs a RoleHandler backed by the provided gorm database connection.
+func NewRoleHandler(db *gorm.DB) *RoleHandler {
+	return &RoleHandler{db: db}
 }
 
-// GetRoles responds with roles filtered by optional domain or tags query parameters.
+type roleListResponse struct {
+	Data       []models.Role `json:"data"`
+	Pagination pagination    `json:"pagination"`
+}
+
+type pagination struct {
+	Page     int   `json:"page"`
+	PageSize int   `json:"page_size"`
+	Total    int64 `json:"total"`
+}
+
+// GetRoles responds with roles filtered by optional domain, search, or tags parameters and supports pagination.
 func (h *RoleHandler) GetRoles(c *gin.Context) {
-	domain := strings.TrimSpace(c.Query("domain"))
-	tagsParam := strings.TrimSpace(c.Query("tags"))
+	page := parsePositiveInt(c.Query("page"), 1)
+	pageSize := parsePositiveInt(c.Query("page_size"), 12)
+	if pageSize > 50 {
+		pageSize = 50
+	}
 
-	baseQuery := `SELECT id, name, domain, tags, bio, personality, background, languages, skills FROM roles`
-	clauses := make([]string, 0, 2)
-	args := make([]interface{}, 0, 3)
+	search := strings.TrimSpace(c.Query("search"))
+	domain := strings.TrimSpace(c.Query("domain"))
+	tags := parseTagTerms(c.Query("tags"))
+
+	query := h.db.WithContext(c.Request.Context()).Model(&models.Role{})
 
 	if domain != "" {
-		clauses = append(clauses, fmt.Sprintf("domain ILIKE $%d", len(args)+1))
-		args = append(args, domain)
+		like := "%" + domain + "%"
+		query = query.Where("domain ILIKE ?", like)
 	}
 
-	if tagsParam != "" {
-		tagTerms := parseTagTerms(tagsParam)
-		tagClauses := make([]string, 0, len(tagTerms))
-
-		for _, tag := range tagTerms {
-			if tag == "" {
-				continue
-			}
-
-			tagClauses = append(tagClauses, fmt.Sprintf("tags ILIKE '%%' || $%d || '%%'", len(args)+1))
-			args = append(args, tag)
-		}
-
-		if len(tagClauses) > 0 {
-			clauses = append(clauses, "("+strings.Join(tagClauses, " OR ")+")")
-		}
+	if search != "" {
+		like := "%" + search + "%"
+		query = query.Where("(name ILIKE ? OR bio ILIKE ?)", like, like)
 	}
 
-	query := baseQuery
-	if len(clauses) > 0 {
-		query += " WHERE " + strings.Join(clauses, " AND ")
+	if len(tags) > 0 {
+		query = query.Where("tags @> ?", pq.StringArray(tags))
 	}
-	query += " ORDER BY id"
 
-	rows, err := h.pool.Query(c.Request.Context(), query, args...)
-	if err != nil {
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "count roles failed"})
+		return
+	}
+
+	offset := (page - 1) * pageSize
+	roles := make([]models.Role, 0, pageSize)
+	if err := query.Order("id ASC").Limit(pageSize).Offset(offset).Find(&roles).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query roles failed"})
 		return
 	}
-	defer rows.Close()
 
-	roles := make([]models.Role, 0)
-	for rows.Next() {
-		var role models.Role
-		if err := rows.Scan(&role.ID, &role.Name, &role.Domain, &role.Tags, &role.Bio, &role.Personality, &role.Background, &role.Languages, &role.Skills); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "scan role failed"})
-			return
-		}
-		roles = append(roles, role)
-	}
-
-	if rows.Err() != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "iterate roles failed"})
-		return
-	}
-
-	c.JSON(http.StatusOK, roles)
+	c.JSON(http.StatusOK, roleListResponse{
+		Data: roles,
+		Pagination: pagination{
+			Page:     page,
+			PageSize: pageSize,
+			Total:    total,
+		},
+	})
 }
 
 func parseTagTerms(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+
 	parts := strings.FieldsFunc(raw, func(r rune) bool {
 		return r == ',' || r == ';'
 	})
 
-	for i, part := range parts {
-		parts[i] = strings.TrimSpace(part)
+	cleaned := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			cleaned = append(cleaned, trimmed)
+		}
 	}
 
-	return parts
+	return cleaned
+}
+
+func parsePositiveInt(raw string, fallback int) int {
+	if strings.TrimSpace(raw) == "" {
+		return fallback
+	}
+
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value <= 0 {
+		return fallback
+	}
+
+	return value
 }

@@ -27,7 +27,7 @@ func main() {
             id SERIAL PRIMARY KEY,
             name VARCHAR(255) NOT NULL,
             domain VARCHAR(255),
-            tags VARCHAR(255),
+            tags TEXT[] DEFAULT ARRAY[]::text[],
             bio TEXT,
             personality JSONB DEFAULT '{}'::jsonb,
             background TEXT,

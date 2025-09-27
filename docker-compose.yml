@@ -1,0 +1,60 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: wwb-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: wwb666666
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: wwb-redis
+    ports:
+      - "6380:6379"
+
+  mongo:
+    image: mongo:7
+    container_name: wwb-mongo
+    ports:
+      - "27018:27017"
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: wwb-backend
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      DB_URL: postgres://postgres:wwb666666@postgres:5432/postgres
+      REDIS_URL: redis:6379
+      MONGO_URI: mongodb://mongo:27017/local
+      QINIU_API_BASE: https://openai.qiniu.com/v1
+      QINIU_API_KEY: ${QINIU_API_KEY:-replace-me}
+      QINIU_TTS_VOICE_TYPE: ${QINIU_TTS_VOICE_TYPE:-qiniu_zh_female_tmjxxy}
+      QINIU_TTS_FORMAT: ${QINIU_TTS_FORMAT:-mp3}
+      QINIU_ASR_MODEL: ${QINIU_ASR_MODEL:-asr}
+      ASR_SAMPLE_RATE: ${ASR_SAMPLE_RATE:-16000}
+      SERVER_ADDR: :8080
+    ports:
+      - "8080:8080"
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile.web
+    container_name: wwb-web
+    depends_on:
+      - backend
+    ports:
+      - "5173:5173"
+
+volumes:
+  postgres-data:

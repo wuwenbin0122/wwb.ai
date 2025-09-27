@@ -3,15 +3,18 @@ module github.com/wuwenbin0122/wwb.ai
 go 1.25.1
 
 require (
-	github.com/gin-contrib/cors v1.7.6
-	github.com/gin-gonic/gin v1.11.0
-	github.com/google/uuid v1.6.0
-	github.com/gorilla/websocket v1.5.3
-	github.com/jackc/pgx/v5 v5.7.6
-	github.com/joho/godotenv v1.5.1
-	github.com/redis/go-redis/v9 v9.14.0
-	go.mongodb.org/mongo-driver v1.17.4
-	go.uber.org/zap v1.27.0
+        github.com/gin-contrib/cors v1.7.6
+        github.com/gin-gonic/gin v1.11.0
+        github.com/google/uuid v1.6.0
+        github.com/gorilla/websocket v1.5.3
+        github.com/jackc/pgx/v5 v5.7.6
+        github.com/joho/godotenv v1.5.1
+        github.com/lib/pq v1.10.9
+        github.com/redis/go-redis/v9 v9.14.0
+        go.mongodb.org/mongo-driver v1.17.4
+        go.uber.org/zap v1.27.0
+        gorm.io/driver/postgres v1.5.9
+        gorm.io/gorm v1.26.1
 )
 
 require (
