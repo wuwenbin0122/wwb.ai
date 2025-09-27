@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wuwenbin0122/wwb.ai/db/models"
 )
@@ -16,8 +18,8 @@ func GetRoleByID(ctx context.Context, pool *pgxpool.Pool, id int64) (*models.Rol
 	}
 
 	var role models.Role
-	const query = `SELECT id, name, domain, tags, bio, personality, background, languages, skills FROM roles WHERE id = $1`
-	if err := pool.QueryRow(ctx, query, id).Scan(
+	const queryExt = `SELECT id, name, domain, tags, bio, personality, background, languages, skills FROM roles WHERE id = $1`
+	if err := pool.QueryRow(ctx, queryExt, id).Scan(
 		&role.ID,
 		&role.Name,
 		&role.Domain,
@@ -28,7 +30,22 @@ func GetRoleByID(ctx context.Context, pool *pgxpool.Pool, id int64) (*models.Rol
 		&role.Languages,
 		&role.Skills,
 	); err != nil {
-		return nil, fmt.Errorf("query role by id: %w", err)
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UndefinedColumn {
+			// Fallback to legacy schema without extended columns
+			const queryLegacy = `SELECT id, name, domain, tags, bio FROM roles WHERE id = $1`
+			if err2 := pool.QueryRow(ctx, queryLegacy, id).Scan(
+				&role.ID,
+				&role.Name,
+				&role.Domain,
+				&role.Tags,
+				&role.Bio,
+			); err2 != nil {
+				return nil, fmt.Errorf("query role by id (legacy): %w", err2)
+			}
+		} else {
+			return nil, fmt.Errorf("query role by id: %w", err)
+		}
 	}
 
 	return &role, nil

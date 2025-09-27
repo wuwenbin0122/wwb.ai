@@ -28,7 +28,11 @@ func main() {
             name VARCHAR(255) NOT NULL,
             domain VARCHAR(255),
             tags VARCHAR(255),
-            bio TEXT
+            bio TEXT,
+            personality JSONB DEFAULT '{}'::jsonb,
+            background TEXT,
+            languages TEXT[] DEFAULT ARRAY['zh', 'en'],
+            skills JSONB DEFAULT '[]'::jsonb
         )`,
 	}
 

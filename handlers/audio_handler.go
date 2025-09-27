@@ -63,34 +63,34 @@ func (h *AudioHandler) HandleASR(c *gin.Context) {
 		return
 	}
 
-	input := services.ASRInput{Format: strings.TrimSpace(req.AudioFormat)}
+    input := services.ASRInput{Format: strings.TrimSpace(req.AudioFormat)}
 
-	fallbackTimeout := 3 * time.Minute
-	if trimmedURL := strings.TrimSpace(req.AudioURL); trimmedURL != "" {
-		input.URL = trimmedURL
-	} else {
-		buffers, err := h.collectAudioBuffers(req)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid audio data", "detail": err.Error()})
-			return
-		}
-
-		if len(buffers) == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "no audio data provided"})
-			return
-		}
-
-		merged := mergeBuffers(buffers)
-		if len(merged) == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "audio payload was empty"})
-			return
-		}
-
-		input.Data = merged
-		if estimated := estimateAudioDurationMs(merged, input.Format); estimated > 0 {
-			fallbackTimeout = computeASRTimeout(estimated)
-		}
-	}
+    // 支持两种路径：
+    // 1) audio_url 存在 → 走 REST（官方规范）
+    // 2) audio_data/audio_chunks → 走 WebSocket（官方 NodeJS 示例）
+    fallbackTimeout := 2 * time.Minute
+    if trimmedURL := strings.TrimSpace(req.AudioURL); trimmedURL != "" {
+        input.URL = trimmedURL
+    } else {
+        buffers, err := h.collectAudioBuffers(req)
+        if err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid audio data", "detail": err.Error()})
+            return
+        }
+        if len(buffers) == 0 {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "no audio data provided"})
+            return
+        }
+        merged := mergeBuffers(buffers)
+        if len(merged) == 0 {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "audio payload was empty"})
+            return
+        }
+        input.Data = merged
+        if estimated := estimateAudioDurationMs(merged, input.Format); estimated > 0 {
+            fallbackTimeout = computeASRTimeout(estimated)
+        }
+    }
 
 	ctx, cancel := h.contextWithTimeout(c.Request.Context(), req.TimeoutMS, fallbackTimeout)
 	defer cancel()

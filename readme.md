@@ -64,6 +64,45 @@ npm install
 
 ```bash
 go run cmd/server/main.go
+
+### 2.1 迁移数据库（roles 表扩展）
+
+启用多语言/技能/人设字段前，请执行迁移（幂等）：
+
+```bash
+# 方式 A：使用内置脚本（推荐）
+go run cmd/scripts/migrate_roles_table/main.go
+
+# 可选：查看列结构
+go run cmd/scripts/inspect_roles/main.go
+
+# 方式 B：直接执行 SQL（等价）
+# 参见 db/migrations/0002_expand_roles_table.up.sql
+```
+
+### 2.2 写入示例人设/技能（可选）
+
+执行扩展版种子脚本，覆盖/补充部分示例角色的人设、技能、语言与背景：
+
+```bash
+go run cmd/scripts/seed_roles_extended/main.go
+```
+
+包含角色：Socrates、Sherlock Holmes、Mulan、Harry Potter。若已存在同名记录，会先删除再重建。
+
+### 2.3 为更多角色自动补全技能（可选）
+
+根据角色名称/领域/标签/简介的关键词自动推断技能，并在不覆盖已有自定义技能的前提下合并写回：
+
+```bash
+go run cmd/scripts/enrich_roles_skills/main.go
+```
+
+规则示例：
+- 哲学/老师/教练/导师 → `socratic_questions`
+- 历史/学者/科研/侦探 → `citation_mode`
+- 心理/咨询/支持/勇敢/温暖 → `emo_stabilizer`
+- 名称命中（如 Socrates/Plato/Confucius、Sherlock Holmes、Mulan/Harry）附加相应技能
 ```
 
 默认监听 `http://localhost:8080`，提供以下接口：

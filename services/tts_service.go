@@ -1,17 +1,18 @@
 package services
 
 import (
-	"bytes"
-	"context"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"strings"
+    "bytes"
+    "context"
+    "encoding/base64"
+    "encoding/json"
+    "fmt"
+    "io"
+    "net/http"
+    "strings"
+    "time"
 
-	"github.com/wuwenbin0122/wwb.ai/config"
-	"go.uber.org/zap"
+    "github.com/wuwenbin0122/wwb.ai/config"
+    "go.uber.org/zap"
 )
 
 // TTSRequest encapsulates a synthesis task forwarded to Qiniu.
@@ -69,15 +70,18 @@ func NewTTSService(cfg *config.Config, logger *zap.SugaredLogger) *TTSService {
 		format = "mp3"
 	}
 
-	return &TTSService{
-		inner: &ttsService{
-			baseURL:       base,
-			defaultVoice:  voice,
-			defaultFormat: format,
-			client:        newDefaultHTTPClient(),
-			logger:        logger,
-		},
-	}
+    // TTS responses can be slower; use a longer HTTP timeout to avoid premature 504s.
+    ttsHTTPClient := newHTTPClientWithTimeout(60 * time.Second)
+
+    return &TTSService{
+        inner: &ttsService{
+            baseURL:       base,
+            defaultVoice:  voice,
+            defaultFormat: format,
+            client:        ttsHTTPClient,
+            logger:        logger,
+        },
+    }
 }
 
 // Synthesize sends text-to-speech request to Qiniu and returns the synthesized audio bytes.

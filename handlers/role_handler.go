@@ -1,13 +1,16 @@
 package handlers
 
 import (
-	"fmt"
-	"net/http"
-	"strings"
+    "errors"
+    "fmt"
+    "net/http"
+    "strings"
 
-	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/wuwenbin0122/wwb.ai/db/models"
+    "github.com/gin-gonic/gin"
+    "github.com/jackc/pgerrcode"
+    "github.com/jackc/pgx/v5/pgconn"
+    "github.com/jackc/pgx/v5/pgxpool"
+    "github.com/wuwenbin0122/wwb.ai/db/models"
 )
 
 // RoleHandler provides HTTP handlers for role resources.
@@ -57,19 +60,40 @@ func (h *RoleHandler) GetRoles(c *gin.Context) {
 	}
 	query += " ORDER BY id"
 
-	rows, err := h.pool.Query(c.Request.Context(), query, args...)
+	ctx := c.Request.Context()
+	rows, err := h.pool.Query(ctx, query, args...)
+	selectExtended := true
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "query roles failed"})
-		return
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UndefinedColumn {
+			selectExtended = false
+			legacyQuery := `SELECT id, name, domain, tags, bio FROM roles`
+			if len(clauses) > 0 {
+				legacyQuery += " WHERE " + strings.Join(clauses, " AND ")
+			}
+			legacyQuery += " ORDER BY id"
+			rows, err = h.pool.Query(ctx, legacyQuery, args...)
+		}
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query roles failed"})
+			return
+		}
 	}
 	defer rows.Close()
 
 	roles := make([]models.Role, 0)
 	for rows.Next() {
 		var role models.Role
-		if err := rows.Scan(&role.ID, &role.Name, &role.Domain, &role.Tags, &role.Bio, &role.Personality, &role.Background, &role.Languages, &role.Skills); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "scan role failed"})
-			return
+		if selectExtended {
+			if err := rows.Scan(&role.ID, &role.Name, &role.Domain, &role.Tags, &role.Bio, &role.Personality, &role.Background, &role.Languages, &role.Skills); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "scan role failed"})
+				return
+			}
+		} else {
+			if err := rows.Scan(&role.ID, &role.Name, &role.Domain, &role.Tags, &role.Bio); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "scan role failed"})
+				return
+			}
 		}
 		roles = append(roles, role)
 	}

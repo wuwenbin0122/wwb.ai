@@ -1,11 +1,11 @@
 package services
 
 import (
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"strings"
-	"time"
+    "encoding/json"
+    "fmt"
+    "net/http"
+    "strings"
+    "time"
 )
 
 const qiniuHTTPTimeout = 20 * time.Second
@@ -24,7 +24,16 @@ type qiniuErrorEnvelope struct {
 }
 
 func newDefaultHTTPClient() *http.Client {
-	return &http.Client{Timeout: qiniuHTTPTimeout}
+    return &http.Client{Timeout: qiniuHTTPTimeout}
+}
+
+// newHTTPClientWithTimeout builds an HTTP client with a custom timeout.
+// Falls back to the library default when duration is non-positive.
+func newHTTPClientWithTimeout(d time.Duration) *http.Client {
+    if d <= 0 {
+        d = qiniuHTTPTimeout
+    }
+    return &http.Client{Timeout: d}
 }
 
 func decodeQiniuError(body []byte) *qiniuAPIError {

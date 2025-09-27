@@ -63,7 +63,7 @@ const HomeTab = ({ roles, loading, error, onExplore, onStart }) => (
                 {roles.map((role) => (
                     <div key={role.id} className="role-card" role="button" tabIndex={0} onClick={() => onStart(role.id)}>
                         <div className="role-avatar" aria-hidden="true">
-                            {role.name.slice(0, 2)}
+                            {String(role?.name ?? "?").slice(0, 2)}
                         </div>
                         <div>
                             <h3>{role.name}</h3>
@@ -249,8 +249,10 @@ const App = () => {
                             error={rolesState.error}
                             onExplore={() => setActiveTab("roles")}
                             onStart={(roleId) => {
-                                if (roleId) {
-                                    setSelectedRoleId(roleId);
+                                const fallback = rolesState.data && rolesState.data.length > 0 ? rolesState.data[0].id : null;
+                                const chosen = roleId || fallback;
+                                if (chosen) {
+                                    setSelectedRoleId(chosen);
                                 }
                                 setActiveTab("chat");
                             }}

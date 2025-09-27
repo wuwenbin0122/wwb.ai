@@ -201,6 +201,7 @@ const VoiceChatPage = ({
     const mediaStreamRef = useRef(null);
     const recordedChunksRef = useRef([]);
     const audioUrlsRef = useRef(new Set());
+    const lastDiagRef = useRef({});
     const chatPendingRef = useRef(false);
 
     const [pendingStart, setPendingStart] = useState(false);
@@ -213,7 +214,7 @@ const VoiceChatPage = ({
     const [ttsPending, setTtsPending] = useState(false);
     const [ttsError, setTtsError] = useState(null);
     const [chatMessages, setChatMessages] = useState([]);
-    const [enabledSkillIds, setEnabledSkillIds] = useState([]);
+    // 技能开关已移除
     const [selectedLanguage, setSelectedLanguage] = useState("zh");
 
     const [audioUrl, setAudioUrl] = useState("");
@@ -236,7 +237,6 @@ const VoiceChatPage = ({
     useEffect(() => {
         if (!selectedRole) {
             setSelectedLanguage("zh");
-            setEnabledSkillIds([]);
             return;
         }
 
@@ -246,21 +246,9 @@ const VoiceChatPage = ({
             setSelectedLanguage("zh");
         }
 
-        if (roleSkills.length > 0) {
-            setEnabledSkillIds(roleSkills.map((skill) => skill.id));
-        } else {
-            setEnabledSkillIds([]);
-        }
-    }, [selectedRole, roleLanguages, roleSkills]);
+    }, [selectedRole, roleLanguages]);
 
-    const toggleSkill = useCallback((skillId) => {
-        setEnabledSkillIds((prev) => {
-            if (prev.includes(skillId)) {
-                return prev.filter((id) => id !== skillId);
-            }
-            return [...prev, skillId];
-        });
-    }, []);
+    // 技能开关已移除
 
     const createMessageId = useCallback(
         (prefix) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`,
@@ -427,8 +415,6 @@ const VoiceChatPage = ({
                     roleId: selectedRoleId,
                     language: selectedLanguage,
                     lang: selectedLanguage,
-                    enabled_skill_ids: enabledSkillIds,
-                    skills: enabledSkillIds,
                     messages: trimmedHistory,
                     history: previousHistory,
                     text: trimmed,
@@ -480,7 +466,7 @@ const VoiceChatPage = ({
                 setChatPending(false);
             }
         },
-        [chatMessages, createMessageId, enabledSkillIds, selectedLanguage, selectedRole, selectedRoleId, synthesizeAndPlay]
+        [chatMessages, createMessageId, selectedLanguage, selectedRole, selectedRoleId, synthesizeAndPlay]
     );
 
     const sendASRRequest = useCallback(
@@ -630,7 +616,7 @@ const VoiceChatPage = ({
                             onClick={() => onSelectRole(role.id)}
                         >
                             <span className="avatar" aria-hidden="true">
-                                {role.name.slice(0, 2)}
+                                {String(role?.name ?? "?").slice(0, 2)}
                             </span>
                             <span>{role.name}</span>
                         </button>
@@ -657,6 +643,13 @@ const VoiceChatPage = ({
 
                 <div className="chat-transcript" role="log">
                     {chatMessages.length === 0 && <p className="muted">记录你的语音或文本，将在这里呈现实时字幕与回复。</p>}
+                    {chatPending && (
+                        <div className="chat-bubble assistant">
+                            <div className="bubble-content">
+                                <span className="typing">● ● ●</span>
+                            </div>
+                        </div>
+                    )}
                     {chatMessages.map((message) => (
                         <div key={message.id} className={`chat-bubble ${message.role}`}>
                             <div className="bubble-content">
@@ -714,6 +707,27 @@ const VoiceChatPage = ({
                         {audioUrl && <source src={audioUrl} type="audio/mpeg" />}
                         您的浏览器不支持 audio 元素。
                     </audio>
+                    <button
+                        type="button"
+                        className="ghost"
+                        onClick={async () => {
+                            const info = {
+                                ...lastDiagRef.current,
+                                voice: selectedVoice,
+                                speed: speechSpeed,
+                            };
+                            const text = JSON.stringify(info, null, 2);
+                            try {
+                                await navigator.clipboard.writeText(text);
+                                console.log("copied diagnostics", info);
+                            } catch (e) {
+                                console.log(text);
+                            }
+                        }}
+                        style={{ marginLeft: 12 }}
+                    >
+                        复制诊断信息
+                    </button>
                 </footer>
             </div>
 
@@ -733,29 +747,7 @@ const VoiceChatPage = ({
                     )}
                 </div>
 
-                <div className="settings-section">
-                    <h3>技能开关</h3>
-                    {roleSkills.length === 0 && <p className="muted">该角色未定义技能。</p>}
-                    {roleSkills.length > 0 && (
-                        <ul className="skill-list">
-                            {roleSkills.map((skill) => (
-                                <li key={skill.id}>
-                                    <label>
-                                        <input
-                                            type="checkbox"
-                                            checked={enabledSkillIds.includes(skill.id)}
-                                            onChange={() => toggleSkill(skill.id)}
-                                        />
-                                        <span>
-                                            {skill.name || skill.id}
-                                            <small className="muted">（{skill.id}）</small>
-                                        </span>
-                                    </label>
-                                </li>
-                            ))}
-                        </ul>
-                    )}
-                </div>
+                {/* 技能开关移除 */}
 
                 <div className="settings-section">
                     <h3>音色与语速</h3>

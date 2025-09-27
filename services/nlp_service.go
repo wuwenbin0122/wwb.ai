@@ -120,7 +120,14 @@ func (s *NLPService) GenerateReply(ctx context.Context, token string, req NLPReq
 		skillIndex[skill.ID] = skill
 	}
 
-	enabledIDs := filterSkillIDs(req.EnabledSkillIDs, skillIndex)
+    enabledIDs := filterSkillIDs(req.EnabledSkillIDs, skillIndex)
+    // If client does not specify skills, default to all skills defined on the role
+    if len(req.EnabledSkillIDs) == 0 && len(skillIndex) > 0 {
+        enabledIDs = make([]string, 0, len(skillIndex))
+        for id := range skillIndex {
+            enabledIDs = append(enabledIDs, id)
+        }
+    }
 	enabledNames := make([]string, 0, len(enabledIDs))
 	for _, id := range enabledIDs {
 		enabledNames = append(enabledNames, skillIndex[id].Name)
@@ -269,6 +276,13 @@ func decodeRoleSkills(raw json.RawMessage) []roleSkill {
 }
 
 func filterSkillIDs(ids []string, allowed map[string]roleSkill) []string {
+	// If the role does not define skills, allow any known skill id
+	known := make(map[string]struct{}, len(skillHooks))
+	for k := range skillHooks {
+		known[k] = struct{}{}
+	}
+
+	useWhitelist := len(allowed) > 0
 	seen := make(map[string]struct{}, len(ids))
 	result := make([]string, 0, len(ids))
 	for _, id := range ids {
@@ -276,8 +290,14 @@ func filterSkillIDs(ids []string, allowed map[string]roleSkill) []string {
 		if trimmed == "" {
 			continue
 		}
-		if _, ok := allowed[trimmed]; !ok {
-			continue
+		if useWhitelist {
+			if _, ok := allowed[trimmed]; !ok {
+				continue
+			}
+		} else {
+			if _, ok := known[trimmed]; !ok {
+				continue
+			}
 		}
 		if _, dup := seen[trimmed]; dup {
 			continue
@@ -325,8 +345,11 @@ func buildSystemPrompt(roleName string, persona rolePersonality, background, ena
 	builder.WriteString(fmt.Sprintf("- 技能开关：%s\n", enabledCSV))
 	builder.WriteString("通用规则：\n")
 	builder.WriteString(fmt.Sprintf("- 回答语言：%s\n", lang))
-	builder.WriteString("- 尽量分段，必要时项目符号清晰表达。\n")
-	builder.WriteString("- 对事实类内容，如不确定请说明不确定并给出进一步追问或验证路径。")
+	builder.WriteString("- 采用第一人称、口语化、亲和的拟人对话语气，不要官腔。\n")
+	builder.WriteString("- 简洁分段：每段 1-3 句；罗列时使用项目符号。\n")
+	builder.WriteString("- 适度共情与复述对方要点，再给出建议或追问。\n")
+	builder.WriteString("- 对事实类内容，如不确定请说明不确定并给出进一步追问或验证路径。\n")
+	builder.WriteString("- 结尾通常附带 1 句自然的追问，促进对话。")
 
 	if len(skillDirectives) > 0 {
 		builder.WriteString("\n技能指令：")
@@ -455,10 +478,15 @@ type skillDirective struct {
 
 var skillHooks = map[string]skillDirective{
 	"socratic_questions": {
-		systemPrompts: []string{"每次回复至少提出 2 个循序渐进的问题，引导对方澄清定义/例外/依据。"},
+		systemPrompts: []string{
+			"每次回复至少提出 2 个循序渐进的问题，引导对方澄清定义/例外/依据。",
+			"当该技能开启时，请采用结构化输出：先一句简短回应；随后以‘想一想：’列出 Q1、Q2（必要时 Q3）；最后一行给出下一步建议。",
+		},
 	},
 	"citation_mode": {
-		systemPrompts: []string{"若引用，请给出简短来源（作者/著作名/篇章）。无法确定时不要杜撰，提示“可能来源”并告知不确定性。"},
+		systemPrompts: []string{
+			"若引用，请给出简短来源（作者/著作名/篇章）。无法确定时不要杜撰，提示‘可能来源’并告知不确定性。",
+		},
 		userRewrite: func(input string) string {
 			note := "[请注明出处（作者/著作名/篇章）；不确定时提示可能来源并说明不确定性]"
 			if strings.Contains(input, note) {
@@ -471,7 +499,9 @@ var skillHooks = map[string]skillDirective{
 		},
 	},
 	"emo_stabilizer": {
-		systemPrompts: []string{"检测到焦虑/沮丧情绪时，先进行共情反映，再给出可执行小步骤。"},
+		systemPrompts: []string{
+			"检测到焦虑/沮丧情绪时，先进行共情反映（用‘我听到…’/‘我理解…’），再给出 1-3 个可执行小步骤。",
+		},
 	},
 }
 
