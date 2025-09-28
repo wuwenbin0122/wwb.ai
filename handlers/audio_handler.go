@@ -3,16 +3,17 @@ package handlers
 import (
 	"context"
 	"encoding/base64"
-	json "encoding/json"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/wuwenbin0122/wwb.ai/config"
 	"github.com/wuwenbin0122/wwb.ai/services"
 	"go.uber.org/zap"
@@ -26,18 +27,25 @@ type AudioHandler struct {
 	logger *zap.SugaredLogger
 }
 
+var asrUpgrader = websocket.Upgrader{
+	ReadBufferSize:  32 * 1024,
+	WriteBufferSize: 32 * 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
 // NewAudioHandler builds a new AudioHandler.
 func NewAudioHandler(cfg *config.Config, asr *services.ASRService, tts *services.TTSService, logger *zap.SugaredLogger) *AudioHandler {
 	return &AudioHandler{cfg: cfg, asr: asr, tts: tts, logger: logger}
 }
 
-type asrRequest struct {
-	Token       string   `json:"token"`
-	AudioURL    string   `json:"audio_url"`
-	AudioData   string   `json:"audio_data"`
-	AudioChunks []string `json:"audio_chunks"`
-	AudioFormat string   `json:"audio_format"`
-	TimeoutMS   int      `json:"timeout_ms"`
+type asrClientMessage struct {
+	Type       string `json:"type"`
+	SampleRate int    `json:"sampleRate"`
+	Channels   int    `json:"channels"`
+	Bits       int    `json:"bits"`
+	Token      string `json:"token"`
 }
 
 type ttsRequest struct {
@@ -49,81 +57,225 @@ type ttsRequest struct {
 	TimeoutMS  int     `json:"timeout_ms"`
 }
 
-// HandleASR forwards a transcription request to Qiniu's REST API.
-func (h *AudioHandler) HandleASR(c *gin.Context) {
-	var req asrRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload", "detail": err.Error()})
-		return
-	}
-
-	token := h.resolveToken(c, req.Token)
+// HandleASRWebsocket proxies streaming audio to Qiniu's ASR WebSocket endpoint.
+func (h *AudioHandler) HandleASRWebsocket(c *gin.Context) {
+	token := h.resolveTokenFromQuery(c)
 	if token == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "qiniu token is required"})
 		return
 	}
 
-    input := services.ASRInput{Format: strings.TrimSpace(req.AudioFormat)}
+	conn, err := asrUpgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		h.logger.Warnf("asr websocket upgrade failed: %v", err)
+		return
+	}
+	defer conn.Close()
 
-    // 支持两种路径：
-    // 1) audio_url 存在 → 走 REST（官方规范）
-    // 2) audio_data/audio_chunks → 走 WebSocket（官方 NodeJS 示例）
-    fallbackTimeout := 2 * time.Minute
-    if trimmedURL := strings.TrimSpace(req.AudioURL); trimmedURL != "" {
-        input.URL = trimmedURL
-    } else {
-        buffers, err := h.collectAudioBuffers(req)
-        if err != nil {
-            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid audio data", "detail": err.Error()})
-            return
-        }
-        if len(buffers) == 0 {
-            c.JSON(http.StatusBadRequest, gin.H{"error": "no audio data provided"})
-            return
-        }
-        merged := mergeBuffers(buffers)
-        if len(merged) == 0 {
-            c.JSON(http.StatusBadRequest, gin.H{"error": "audio payload was empty"})
-            return
-        }
-        input.Data = merged
-        if estimated := estimateAudioDurationMs(merged, input.Format); estimated > 0 {
-            fallbackTimeout = computeASRTimeout(estimated)
-        }
-    }
-
-	ctx, cancel := h.contextWithTimeout(c.Request.Context(), req.TimeoutMS, fallbackTimeout)
+	ctx, cancel := context.WithCancel(c.Request.Context())
 	defer cancel()
 
-	result, err := h.asr.Recognize(ctx, token, input)
-	if err != nil {
-		h.logger.Warnf("asr recognize failed: %v", err)
-		c.JSON(statusFromError(err), gin.H{"error": "asr processing failed", "detail": err.Error()})
-		return
+	var (
+		stream       *services.ASRStream
+		streamMu     sync.Mutex
+		writeMu      sync.Mutex
+		upstreamOnce sync.Once
+		upstreamDone = make(chan struct{})
+	)
+
+	sendJSON := func(payload interface{}) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return conn.WriteJSON(payload)
 	}
 
-	if result == nil {
-		h.logger.Warn("asr recognize returned no result without error")
-		c.JSON(http.StatusBadGateway, gin.H{"error": "asr processing failed", "detail": "empty response"})
-		return
-	}
-
-	if len(result.Raw) > 0 {
-		var envelope interface{}
-		if err := json.Unmarshal(result.Raw, &envelope); err == nil {
-			c.JSON(http.StatusOK, envelope)
-			return
+	sendError := func(message string, detail error) {
+		errMsg := gin.H{"type": "error", "error": message}
+		if detail != nil {
+			errMsg["detail"] = detail.Error()
+			h.logger.Warnf("asr websocket error: %s: %v", message, detail)
+		} else {
+			h.logger.Warnf("asr websocket error: %s", message)
 		}
-		// fallback to legacy payload if raw cannot be parsed
+		_ = sendJSON(errMsg)
 	}
 
-	response := gin.H{
-		"reqid":       result.ReqID,
-		"text":        result.Text,
-		"duration_ms": result.DurationMS,
+	closeUpstream := func() {
+		streamMu.Lock()
+		current := stream
+		stream = nil
+		streamMu.Unlock()
+		if current != nil {
+			_ = current.Close()
+		}
+		upstreamOnce.Do(func() { close(upstreamDone) })
 	}
 
-	c.JSON(http.StatusOK, response)
+	go func() {
+		<-ctx.Done()
+		closeUpstream()
+	}()
+
+	handleUpstream := func(s *services.ASRStream) {
+		go func() {
+			defer closeUpstream()
+			for {
+				msgType, payload, err := s.Conn.ReadMessage()
+				if err != nil {
+					if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+						h.logger.Warnf("qiniu asr websocket closed unexpectedly: %v", err)
+					}
+					sendError("upstream connection closed", err)
+					return
+				}
+
+				switch msgType {
+				case websocket.BinaryMessage:
+					envelope, raw, err := services.ParseASRWSMessage(payload)
+					if err != nil {
+						sendError("parse upstream payload", err)
+						continue
+					}
+					text, isFinal, duration := services.ExtractTranscript(envelope)
+					event := gin.H{"type": "transcript", "is_final": isFinal}
+					if text != "" {
+						event["text"] = text
+					}
+					if duration > 0 {
+						event["duration_ms"] = duration
+					}
+					if len(raw) > 0 {
+						event["raw"] = json.RawMessage(raw)
+					}
+					if err := sendJSON(event); err != nil {
+						h.logger.Warnf("send transcript to client failed: %v", err)
+						return
+					}
+				case websocket.TextMessage:
+					// Forward text control frames as-is for debugging.
+					msg := strings.TrimSpace(string(payload))
+					if msg != "" {
+						_ = sendJSON(gin.H{"type": "upstream", "payload": msg})
+					}
+				default:
+					// ignore
+				}
+			}
+		}()
+	}
+
+	for {
+		msgType, payload, err := conn.ReadMessage()
+		if err != nil {
+			if !websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+				h.logger.Warnf("client asr websocket closed: %v", err)
+			}
+			break
+		}
+
+		switch msgType {
+		case websocket.TextMessage:
+			var msg asrClientMessage
+			if err := json.Unmarshal(payload, &msg); err != nil {
+				sendError("invalid control message", err)
+				continue
+			}
+
+			msgTypeLower := strings.ToLower(strings.TrimSpace(msg.Type))
+			switch msgTypeLower {
+			case "start":
+				streamMu.Lock()
+				alreadyStarted := stream != nil
+				streamMu.Unlock()
+				if alreadyStarted {
+					sendError("asr stream already started", nil)
+					continue
+				}
+
+				sessionToken := token
+				if candidate := strings.TrimSpace(msg.Token); candidate != "" {
+					sessionToken = candidate
+				}
+
+				sr := msg.SampleRate
+				if sr <= 0 {
+					sr = 16000
+				}
+				ch := msg.Channels
+				if ch <= 0 {
+					ch = 1
+				}
+				bits := msg.Bits
+				if bits <= 0 {
+					bits = 16
+				}
+
+				upstream, err := h.asr.OpenStream(ctx, sessionToken, sr, ch, bits)
+				if err != nil {
+					sendError("open upstream stream", err)
+					continue
+				}
+
+				streamMu.Lock()
+				stream = upstream
+				streamMu.Unlock()
+
+				handleUpstream(upstream)
+
+				ack := gin.H{
+					"type":       "ready",
+					"sampleRate": sr,
+					"channels":   ch,
+					"bits":       bits,
+				}
+				if err := sendJSON(ack); err != nil {
+					h.logger.Warnf("send ready event failed: %v", err)
+					closeUpstream()
+					return
+				}
+
+			case "stop":
+				streamMu.Lock()
+				current := stream
+				streamMu.Unlock()
+				if current != nil {
+					if err := current.Writer.SendStop(); err != nil {
+						sendError("send stop", err)
+					}
+				}
+
+			case "ping":
+				_ = sendJSON(gin.H{"type": "pong"})
+
+			default:
+			sendError("unsupported control message", fmt.Errorf("%s", msg.Type))
+			}
+
+		case websocket.BinaryMessage:
+			streamMu.Lock()
+			current := stream
+			streamMu.Unlock()
+			if current == nil {
+				sendError("stream not initialized", errors.New("start message required before audio"))
+				continue
+			}
+			if err := current.Writer.SendAudioChunk(payload); err != nil {
+				sendError("forward audio chunk", err)
+				closeUpstream()
+				return
+			}
+
+		case websocket.CloseMessage:
+			closeUpstream()
+			return
+
+		default:
+			// ignore
+		}
+	}
+
+	closeUpstream()
+	<-upstreamDone
 }
 
 // HandleTTS forwards text-to-speech requests to Qiniu and returns the synthesized audio.
@@ -256,120 +408,4 @@ func parseAuthorizationToken(header string) string {
 	return ""
 }
 
-func (h *AudioHandler) collectAudioBuffers(req asrRequest) ([][]byte, error) {
-	buffers := make([][]byte, 0, len(req.AudioChunks)+1)
-
-	if data := strings.TrimSpace(req.AudioData); data != "" {
-		decoded, err := decodeAudioField(data)
-		if err != nil {
-			return nil, fmt.Errorf("decode audio_data: %w", err)
-		}
-		buffers = append(buffers, decoded)
-	}
-
-	for idx, chunk := range req.AudioChunks {
-		trimmed := strings.TrimSpace(chunk)
-		if trimmed == "" {
-			continue
-		}
-		decoded, err := decodeAudioField(trimmed)
-		if err != nil {
-			return nil, fmt.Errorf("decode audio_chunks[%d]: %w", idx, err)
-		}
-		buffers = append(buffers, decoded)
-	}
-
-	return buffers, nil
-}
-
-func decodeAudioField(value string) ([]byte, error) {
-	payload := value
-	if strings.HasPrefix(payload, "data:") {
-		parts := strings.SplitN(payload, ",", 2)
-		if len(parts) != 2 {
-			return nil, errors.New("malformed data URI")
-		}
-		payload = parts[1]
-	}
-
-	payload = strings.TrimSpace(payload)
-	if payload == "" {
-		return nil, errors.New("empty audio payload")
-	}
-
-	decoded, err := base64.StdEncoding.DecodeString(payload)
-	if err != nil {
-		return nil, err
-	}
-	return decoded, nil
-}
-
-func mergeBuffers(chunks [][]byte) []byte {
-	if len(chunks) == 0 {
-		return nil
-	}
-
-	total := 0
-	for _, chunk := range chunks {
-		total += len(chunk)
-	}
-
-	merged := make([]byte, 0, total)
-	for _, chunk := range chunks {
-		if len(chunk) == 0 {
-			continue
-		}
-		merged = append(merged, chunk...)
-	}
-
-	return merged
-}
-
-func estimateAudioDurationMs(data []byte, format string) int {
-	if len(data) == 0 {
-		return 0
-	}
-
-	format = strings.ToLower(strings.TrimSpace(format))
-	compute := func(pcmBytes int) int {
-		if pcmBytes <= 0 {
-			return 0
-		}
-		samples := pcmBytes / 2
-		if samples <= 0 {
-			return 0
-		}
-		seconds := float64(samples) / 16000.0
-		if seconds <= 0 {
-			return 0
-		}
-		return int(math.Round(seconds * 1000))
-	}
-
-	switch {
-	case format == "" || format == "wav" || format == "wave" || strings.HasSuffix(format, "/wav") || strings.HasSuffix(format, "/wave"):
-		if len(data) <= 44 {
-			return 0
-		}
-		return compute(len(data) - 44)
-	case strings.Contains(format, "pcm"):
-		return compute(len(data))
-	default:
-		return 0
-	}
-}
-
-func computeASRTimeout(durationMs int) time.Duration {
-	estimated := time.Duration(durationMs) * time.Millisecond
-	if estimated <= 0 {
-		return 3 * time.Minute
-	}
-	timeout := estimated*2 + 30*time.Second
-	if timeout < 90*time.Second {
-		timeout = 90 * time.Second
-	}
-	if timeout > 5*time.Minute {
-		timeout = 5 * time.Minute
-	}
-	return timeout
-}
+// legacy helpers removed: streaming ASR no longer accepts REST payloads

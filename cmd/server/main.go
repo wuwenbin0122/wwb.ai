@@ -94,7 +94,7 @@ func main() {
 	asrService := services.NewASRService(cfg, sugar)
 	ttsService := services.NewTTSService(cfg, sugar)
 	audioHandler := handlers.NewAudioHandler(cfg, asrService, ttsService, sugar)
-	router.POST("/api/audio/asr", audioHandler.HandleASR)
+	router.GET("/ws/audio/asr", audioHandler.HandleASRWebsocket)
 	router.POST("/api/audio/tts", audioHandler.HandleTTS)
 	router.GET("/api/audio/voices", audioHandler.HandleVoiceList)
 

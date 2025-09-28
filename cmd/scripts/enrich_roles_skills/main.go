@@ -16,6 +16,15 @@ type skill struct {
 	ID   string `json:"id"`
 }
 
+type role struct {
+	id     int64
+	name   string
+	domain string
+	tags   string
+	bio    string
+	skills []byte // jsonb
+}
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -35,15 +44,6 @@ func main() {
 		log.Fatalf("query roles: %v", err)
 	}
 	defer rows.Close()
-
-	type role struct {
-		id     int64
-		name   string
-		domain string
-		tags   string
-		bio    string
-		skills []byte // jsonb
-	}
 
 	roles := make([]role, 0)
 	for rows.Next() {
@@ -78,7 +78,7 @@ func main() {
 	fmt.Printf("done. roles updated: %d\n", updated)
 }
 
-func mergeSkills(r *role) ([]skill, bool, error) {
+func mergeSkills(r role) ([]skill, bool, error) {
 	existing := parseExistingSkills(r.skills)
 	existingSet := make(map[string]skill, len(existing))
 	for _, s := range existing {

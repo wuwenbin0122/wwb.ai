@@ -160,8 +160,8 @@ func (s *ttsService) synthesize(ctx context.Context, token string, req TTSReques
 	}
 
 	var envelope ttsAPIResponse
-	if err := json.Unmarshal(respBody, &envelope); err != nil {
-		return nil, fmt.Errorf("decode tts response: %w", err)
+	if unmarshalErr := json.Unmarshal(respBody, &envelope); unmarshalErr != nil {
+		return nil, fmt.Errorf("decode tts response: %w", unmarshalErr)
 	}
 
 	if envelope.Error != nil && envelope.Error.Message != "" {
