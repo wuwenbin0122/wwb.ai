@@ -6,7 +6,7 @@
 
 ## 亮点能力
 
-- **REST 化的语音能力接入**：已替换旧版 WebSocket 流程，统一通过 `https://openai.qiniu.com/v1`（或备用域名）调用七牛云 `/voice/asr`、`/voice/tts`、`/voice/list` 等接口。
+- **实时语音能力接入**： WebSocket 流程，通过 `https://openai.qiniu.com/v1`（或备用域名）调用七牛云 `/voice/asr`、`/voice/tts`、`/voice/list` 等接口。
 - **三栏实时对话工作台**：左侧角色切换，中部显示字幕与回复气泡，右侧提供音色选择、语速滑块与音频播放器，契合产品设计稿。
 - **音色库与语速配置**：前端可拉取音色列表、试听音色，并在发送 TTS 请求时动态选择音色与语速。
 - **角色目录与发现页**：重构角色目录筛选、热门角色展示及搜索框，支持从“发现/角色目录”一键跳转到实时对话。
@@ -18,7 +18,7 @@
 
 | 层级 | 说明 |
 | --- | --- |
-| 后端 | Go 1.25、Gin、Zap 日志、官方 `net/http` 调用七牛 REST API |
+| 后端 | Go 1.25、Gin、Zap 日志、 调用七牛  API |
 | 前端 | React + Vite、原子化 CSS（自定义样式表）、Web Audio / AudioWorklet 录音处理 |
 | 数据层 | PostgreSQL、MongoDB、Redis（当前主要用于未来扩展） |
 
@@ -111,7 +111,7 @@ go run cmd/scripts/enrich_roles_skills/main.go
 | --- | --- | --- |
 | `GET`  | `/api/roles`          | 角色目录查询（支持 `domain`、`tags`） |
 | `POST` | `/api/nlp/chat`        | 组合系统提示并转发至七牛大模型，返回助手回复 |
-| `POST` | `/api/audio/asr`      | 提交音频（Base64 或 URL）并获取转写文本 |
+| `GET`  | `/ws/audio/asr` (WS)  | WebSocket 代理：浏览器推送 PCM，后端代连七牛 |
 | `POST` | `/api/audio/tts`      | 文本合成语音，返回 Base64 音频串 |
 | `GET`  | `/api/audio/voices`   | 拉取七牛官方音色列表 |
 | `GET`  | `/health`             | 健康检查 |
@@ -139,27 +139,24 @@ npm run dev
 
 ## 接口示例
 
-### 语音识别（后端会转发至七牛）
+### 语音识别（WebSocket 流式代理）
+
+浏览器或命令行需改用 WebSocket 通道，并在查询参数中携带七牛颁发的 `token`：
 
 ```bash
-curl -X POST http://localhost:8080/api/audio/asr \
-  -H "Content-Type: application/json" \
-  -d '{
-        "audio_format": "wav",
-        "audio_data": "<Base64>"
-      }'
+wscat -c "ws://localhost:8080/ws/audio/asr?token=<QiniuToken>"
 ```
 
-响应体将包含：
+连接建立后：
 
-```json
-{
-  "reqid": "...",
-  "text": "识别出的文本",
-  "duration_ms": 1673,
-  "raw": { "reqid": "...", "data": { ... } }
-}
-```
+1. 发送配置帧：`{"type":"start","sampleRate":16000,"channels":1,"bits":16}`。
+2. 连续发送二进制 PCM（16bit/单声道/16kHz）分片。
+3. 发送 `{"type":"stop"}` 结束流式识别。
+
+服务端会转发至七牛 ASR，并推送 `transcript` 事件（含 `text` 与是否最终结果 `is_final`）。
+
+
+
 
 ### 语音合成
 
