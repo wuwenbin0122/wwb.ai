@@ -180,5 +180,3 @@ curl -X POST http://localhost:8080/api/audio/tts \
 - 会话记录与收藏：结合 Redis/MongoDB 实现历史对话时间线及片段收藏。
 - 角色管理后台：为运营/创作者提供 Prompt 片段、技能配置等管理界面。
 - 多模态能力：结合七牛图片 / 视频 API 打造更丰富的互动形式。
-
-欢迎提交 Issue 或 Pull Request 与我们共同完善体验。
